@@ -1,8 +1,9 @@
 import { DeliverooApi } from "@unitn-asa/deliveroo-js-client";
 
 const client = new DeliverooApi(
-    'https://deliveroojs2.onrender.com',
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjI0NTQwYmQ0YjEzIiwibmFtZSI6ImNpYW8iLCJpYXQiOjE3MTM2MzA1NzV9.T4j-dRu8vfMff9pvdK0cTcjeKJrrcrTuhJRF4IYGajs'
+    //'https://deliveroojs2.onrender.com',
+    'http://localhost:8080',
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjZkYzg3NDBlMjJhIiwibmFtZSI6ImNpYW8iLCJpYXQiOjE3MTQ4Mjg3MTF9.rUawy6LtitVA8QQV2R2MY0XsEY_PtM0B4-jxml0JTPk'
 )
 
 function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
@@ -182,13 +183,13 @@ function aStarPath (dag, start, goal){
  * Beliefset revision function
  */
 const me = {};
+
 client.onYou( ( {id, name, x, y, score} ) => {
     me.id = id
     me.name = name
     me.x = x
     me.y = y
     me.score = score
-    
     //console.log(x, y, myDag.getNeighbours(x+'|'+y))
     //console.log(aStarPath(myDag, x+'|'+y, 15+'|'+5))
 })
@@ -200,33 +201,22 @@ async function modifyGlobalVariables(){
 }
 
 client.onParcelsSensing( async ( perceived_parcels ) => {
-    
-    const options = []
     for (const p of perceived_parcels) {
-        if (! parcels.has(p.id)){
-            parcels.set(p.id, [])
-        }
-        const history = parcels.get(p.id)
-        
-        const last = history[history.length-1]
-        
-        if ( !last || last.x != p.x || last.y != p.y) {
-            parcels.get(p.id).push(p)
-        }
-        if ( p.carriedBy != null ){
-            parcels.delete(p.id)  
-        }
-        if (history.length > 3){
-            parcels.get(p.id).shift()
+        parcels[p.id] = p.reward
+        if (Object.keys(parcels).length > 20){
+            let keys = Object.keys(parcels)
+            let toDelete = keys[0]
+            delete parcels[toDelete]
         }
     }
-    //console.log("Historyyyyyyyyyyy",parcels)
-    
+    //console.log("--------------")
+    //console.log(parcels)
 } )
 
-
+let parameters = null
 client.onConfig( (param) => {
-    console.log(param);
+    parameters = param
+    console.log(parameters);
 } )
 
 function findNearestDelivery(map, object){
@@ -246,7 +236,7 @@ function findNearestDelivery(map, object){
  * Options generation and filtering function
  */
 client.onParcelsSensing( parcels => {
-
+    //? gestire parcelsensing perché si attiva solo con un pacchetto
     // TODO revisit beliefset revision so to trigger option generation only in the case a new parcel is observed
     //carried by 
     //distanza massima
@@ -258,20 +248,23 @@ client.onParcelsSensing( parcels => {
      * Options generation
      */
     
-    
-
     const options = []
     for (const parcel of parcels.values())
         if ( ! parcel.carriedBy ){
             options.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id ] );
         }else if(parcel.carriedBy == me.id){
-            carriedByMe.set(parcel.id, parcel)
+            carriedByMe.set(parcel.id, parcel.reward)
         }
     //Go to delivery
-    if (options.length==0 && carriedByMe.size != 0){
+    //!Delivery???
+    if (carriedByMe.size != 0){
         const coordinate = stringToCoordinate(findNearestDelivery(myMap, me))
+        myAgent.removeDelivery()
         myAgent.push( ['delivery', coordinate[0], coordinate[1]])
     }else if(options.length==0 && carriedByMe.size == 0){
+        //todo muoviti random
+        myAgent.push(['go_to', 12, 12])
+        /*
         if (me.x % 1 == 0 && me.y % 1 == 0){
             const neighbours = myDag.getNeighbours(me.x+'|'+me.y)
             const random = Math.floor(Math.random() * neighbours.length) 
@@ -279,6 +272,7 @@ client.onParcelsSensing( parcels => {
             //console.log("go to", coordinate, random)
             myAgent.push(['go_to', coordinate[0], coordinate[1]])
         }
+        */
     }
     //Move randomly
     //if (options.length==0 && )
@@ -305,15 +299,16 @@ client.onParcelsSensing( parcels => {
         myAgent.push( best_option )
 
 } )
+
 let agentDetected = new Map();
 client.onAgentsSensing( (agents) =>{
+    //myAgent.push(['go_to', 12, 12])
     for(const agent of agents){
         agentDetected.set(agent.id, agent)
     }
     //console.log("Agents Sensing--------",agentDetected);
 } )
 // client.onYou( agentLoop )
-
 
 
 /**
@@ -325,13 +320,16 @@ class IntentionRevision {
     get intention_queue () {
         return this.#intention_queue;
     }
+    async removeDelivery (){
+        this.#intention_queue = this.#intention_queue.filter((elem) => elem.predicate[0] != 'delivery')
+    }
 
     async loop ( ) {
         while ( true ) {
             // Consumes intention_queue if not empty
             if ( this.intention_queue.length > 0 ) {
                 console.log( 'intentionRevision.loop', this.intention_queue.map(i=>i.predicate) );
-            
+                
                 // Current intention
                 const intention = this.intention_queue[0];
                 
@@ -350,9 +348,14 @@ class IntentionRevision {
                 .catch( error => {
                     // console.log( 'Failed intention', ...intention.predicate, 'with error:', ...error )
                 } );
-
+                
                 // Remove from the queue
-                this.intention_queue.shift();
+                //? go_to gestito 
+                //!if (intention.predicate[0] != 'go_to'){
+                this.#intention_queue = this.#intention_queue.filter((elem) => elem.predicate.join(' ') != intention.predicate.join(' '))
+                //!}
+                //this.intention_queue.shift();
+                see_queue(this.intention_queue)
             }
             // Postpone next iteration at setImmediate
             await new Promise( res => setImmediate( res ) );
@@ -382,28 +385,51 @@ class IntentionRevisionQueue extends IntentionRevision {
 
 }
 
+function see_queue(queue){
+    console.log('\x1b[36m%s\x1b[0m', "Start Queue Intention")
+    for(const elem of queue){
+        console.log("Intention:",elem.predicate, elem.parent, "Utility: ", UtilityFunction(elem.predicate, elem.parent))
+    }
+    console.log('\x1b[36m%s\x1b[0m', "End Queue Intention")
+}
+
 class IntentionRevisionReplace extends IntentionRevision {
 
     async push ( predicate ) {
         // Check if already queued
-        console.log("Intentionnnnnnn")
-        const last = this.intention_queue.at( this.intention_queue.length - 1 );
-        if ( last && last.predicate.join(' ') == predicate.join(' ') ) {
+        if(this.intention_queue.length > 0){
+            for(const elem of this.intention_queue){
+                if(elem.predicate.join(' ') == predicate.join(' ')){
+                    //console.log("già presente nella coda")
+                    return;
+                }
+            }
+        }
+        //? modificare e mettere [0]  
+        const first = this.intention_queue.at( this.intention_queue.length - 1 );
+        //* cancel
+        if ( first && first.predicate.join(' ') == predicate.join(' ') ) {
             return; // intention is already being achieved
         }
         
         console.log( 'IntentionRevisionReplace.push', predicate );
         const intention = new Intention( this, predicate );
-        console.log("Utility Function:", UtilityFunction(intention.predicate, intention.parent))
+        //console.log("Utility Function:", UtilityFunction(intention.predicate, intention.parent))
         
         this.intention_queue.push( intention );
-        this.intention_queue.sort((a, b) => UtilityFunction(a.predicate, a.parent) - UtilityFunction(b.predicate, b.parent))
-        const last2 = this.intention_queue.at( this.intention_queue.length - 1 );
-        // Force current intention stop 
-        if ( last && last2 && last.predicate.join(' ') == last2.predicate.join(' ') ) {
-            console.log(last, last2)
-            last.stop();
+        this.intention_queue.sort((a, b) => UtilityFunction(b.predicate, b.parent) - UtilityFunction(a.predicate, a.parent))
+        this.intention_queue.filter(item => { return UtilityFunction(item.predicate, item.parent) > 0; });
+        const first2 = this.intention_queue[0];
+        // Force current intention stop
+        if (first & first2){
+            console.log(first.predicate.join(' '), first2.predicate.join(' ')) //perché undefinded first ae first 2?
         }
+        //! gestire 2 delivery nella coda
+        if ( first && first2 && first.predicate.join(' ') != first2.predicate.join(' ') ) {
+            console.log(first, first2)
+            first.stop();
+        }
+        see_queue(this.intention_queue)
     }
 
 }
@@ -424,7 +450,6 @@ class IntentionRevisionRevise extends IntentionRevision {
         const intention = new Intention( this, predicate );
         console.log("Utility Function:", UtilityFunction(intention.predicate, intention.parent))
         this.intention_queue.push( intention );
-        
         // Force current intention stop 
         if ( last ) {
             last.stop();
@@ -434,10 +459,10 @@ class IntentionRevisionRevise extends IntentionRevision {
 }
 
 /*
-point of parcels
-distace 
-agents adversarial near parcels
-parcel near delivery zone
+*point of parcels
+*distace 
+*agents adversarial near parcels
+*parcel near delivery zone
 tile near package
 
 
@@ -447,17 +472,65 @@ function UtilityFunction(predicate, parent){
     const x = predicate[1]
     const y = predicate[2]
     let score = 0
-    let action_score = 0
-    let parent_score = 0
-    let distance_score = distance({x,y}, me)
-    let agents_near_parcels_score = 20
-    let parcel_score = 0
-    let parcel_distance_delivery_zone = 20
-    if (action == 'go_to') { //CONTROLLARE GO PICK UP //controllare pickup
-        action_score = 1
+    let decadig_interval = 0
+    let distance_score = distance({x,y}, me) * (parameters['MOVEMENT_DURATION']/1000)
+    if (parameters['PARCEL_DECADING_INTERVAL'] != 'infinite'){
+        decadig_interval = parseInt(parameters['PARCEL_DECADING_INTERVAL'])
+        distance_score = distance_score / decadig_interval
     }
-    if (parent == "GoPickUp ()"){
-        parent_score = 1
+    let scoreNearestAgents = 0
+    for(const [,a] of agentDetected){ //! agent could not be in this position
+        const radius = 3
+        if (a.x < x + radius && a.x > x - radius && a.y < y + radius && a.y > y - radius && me.x != a.x && me.y != a.y){
+            console.log("Agent Near Parcels")
+            scoreNearestAgents = scoreNearestAgents + parameters['PARCEL_REWARD_AVG'] / 20
+        }
+    }
+
+    if(action == 'go_to'){
+        score = 4
+    }
+    if (action == 'go_pick_up'){
+        console.log("-------------------",predicate, parcels[predicate[3]])
+        const scorePackage = parcels[predicate[3]] - distance_score
+        const node = findNearestDelivery(myMap, {x: x, y: y})
+        const parcel_distance_delivery_zone = distanceString(x +'|'+y, node)
+        score = scorePackage
+        score =  score - parcel_distance_delivery_zone
+        if (scoreNearestAgents > 0){
+            score = 0
+        }
+    }
+    if (action == 'delivery'){
+        let scorePackageCarriedByMe = 0
+        for (const [,score] of carriedByMe) {
+            scorePackageCarriedByMe = scorePackageCarriedByMe + score;
+        }
+        console.log("------------------", predicate, scorePackageCarriedByMe)
+        const alpha = 3
+        scorePackageCarriedByMe = scorePackageCarriedByMe - Object.keys(carriedByMe).length*distance_score
+        //score = alpha*scorePackageCarriedByMe/distance({x,y}, me) + scorePackageCarriedByMe 
+        score = score- scoreNearestAgents
+        score = scorePackageCarriedByMe
+    }
+
+
+
+    //let score = 0
+    //let action_score = 1
+    //let parent_score = 1
+    //let agents_near_parcels_score = 20
+    //let parcel_score = 0
+    //let parcel_distance_delivery_zone = 20
+    //let number_package = carriedByMe.size
+    //? if delivery -> sum(carriedByMe) >< utility pickup 
+
+    /*
+    if (action == 'go_to') { //CONTROLLARE GO PICK UP //controllare pickup
+        score = 0.5
+    }
+    
+    if (action == 'go_pick_up'){
         const element = Array.from(parcels.values()).find(elemento => {
             return elemento.x === x && elemento.y === y;
           });
@@ -477,10 +550,8 @@ function UtilityFunction(predicate, parent){
     if(agents_near_parcels_score < 3){
         score = 0
     }
-    // togliere noi come agent negli agent vicini al pacchetto
-    if (action == 'go_pick_up'){
-        score = 1000
-    }  
+    */
+    // todo togliere noi come agent negli agent vicini al pacchetto
     return score;
 }
 
@@ -641,13 +712,14 @@ class GoPickUp extends Plan {
         return go_pick_up == 'go_pick_up';
     }
 
-    async execute ( go_pick_up, x, y ) {
+    async execute ( go_pick_up, x, y) {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await this.subIntention( ['go_to', x, y] );
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await client.pickup()
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         return true;
+
     }
 
 }
@@ -776,6 +848,7 @@ class BlindMove extends Plan {
     }
 }
 
+let blackList = new Array()
 
 class AstarPlan extends Plan{
 
@@ -785,7 +858,9 @@ class AstarPlan extends Plan{
 
     async execute ( go_to, x, y ) {
         const path = aStarPath(myDag, me.x+'|'+me.y, x+'|'+y)
-        console.log(path)
+        //console.log(path)
+        let countStacked = 3
+        console.log("execute")
         while ( me.x != x || me.y != y ) {
             
             if ( this.stopped ) throw ['stopped']; // if stopped then quit
@@ -828,8 +903,15 @@ class AstarPlan extends Plan{
             }
             
             if ( ! status_x && ! status_y) {
-                this.log('stucked');
-                throw 'stucked';
+                this.log('stucked ', countStacked);
+                //await this.subIntention( 'go_to', {x: x, y: y} );
+                await timeout(1000)
+                if(countStacked <= 0){
+                    throw 'stucked';
+                }else{
+                    countStacked -= 1;
+                }
+
             } else if ( me.x == x && me.y == y ) {
                 // this.log('target reached');
             }
@@ -840,6 +922,14 @@ class AstarPlan extends Plan{
 
     }
 }
+
+function timeout(mseconds) {
+    return new Promise(resolve => {
+      setTimeout(() => {
+        resolve();
+      }, mseconds);
+    });
+  }
 // plan classes are added to plan library 
 planLibrary.push( GoPickUp )
 planLibrary.push( AstarPlan )
