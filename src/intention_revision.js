@@ -303,9 +303,17 @@ client.onParcelsSensing( parcels => {
 let agentDetected = new Map();
 client.onAgentsSensing( (agents) =>{
     //myAgent.push(['go_to', 12, 12])
-    for(const agent of agents){
-        agentDetected.set(agent.id, agent)
+    for(const agent of agents){  
+        agent.countSeen = -1;
+        agentDetected.set(agent.id, agent);
     }
+    for(const agent of agentDetected.values()){  
+        if( agent.countSeen < 60){
+            agent.countSeen =  agent.countSeen + 1;
+            agentDetected.set(agent.id, agent);
+        }
+    }
+    console.log(agentDetected)
     //console.log("Agents Sensing--------",agentDetected);
 } )
 // client.onYou( agentLoop )
@@ -397,28 +405,29 @@ class IntentionRevisionReplace extends IntentionRevision {
 
     async push ( predicate ) {
         // Check if already queued
+        var is_present = false
         if(this.intention_queue.length > 0){
             for(const elem of this.intention_queue){
                 if(elem.predicate.join(' ') == predicate.join(' ')){
                     //console.log("già presente nella coda")
-                    return;
+                    is_present = true
                 }
             }
         }
         //? modificare e mettere [0]  
-        const first = this.intention_queue.at( this.intention_queue.length - 1 );
+        const first = this.intention_queue[0]; // 10 7 4 2 // 7
         //* cancel
-        if ( first && first.predicate.join(' ') == predicate.join(' ') ) {
-            return; // intention is already being achieved
+        if(is_present == false) {
+            const intention = new Intention( this, predicate );
+            console.log( 'IntentionRevisionReplace.push', predicate );
+            //console.log("Utility Function:", UtilityFunction(intention.predicate, intention.parent))
+            this.intention_queue.push( intention );
         }
-        
-        console.log( 'IntentionRevisionReplace.push', predicate );
-        const intention = new Intention( this, predicate );
-        //console.log("Utility Function:", UtilityFunction(intention.predicate, intention.parent))
-        
-        this.intention_queue.push( intention );
-        this.intention_queue.sort((a, b) => UtilityFunction(b.predicate, b.parent) - UtilityFunction(a.predicate, a.parent))
-        this.intention_queue.filter(item => { return UtilityFunction(item.predicate, item.parent) > 0; });
+        if(me.x % 1 == 0 && me.y % 1 == 0){
+            this.intention_queue.sort((a, b) => UtilityFunction(b.predicate, b.parent) - UtilityFunction(a.predicate, a.parent))
+            this.intention_queue.filter(item => { return UtilityFunction(item.predicate, item.parent) > 0; });
+            see_queue(this.intention_queue)
+        }
         const first2 = this.intention_queue[0];
         // Force current intention stop
         if (first & first2){
@@ -429,7 +438,6 @@ class IntentionRevisionReplace extends IntentionRevision {
             console.log(first, first2)
             first.stop();
         }
-        see_queue(this.intention_queue)
     }
 
 }
@@ -462,12 +470,60 @@ class IntentionRevisionRevise extends IntentionRevision {
 *point of parcels
 *distace 
 *agents adversarial near parcels
-*parcel near delivery zone
-tile near package
-
-
 */
+
 function UtilityFunction(predicate, parent){
+    const action = predicate[0]
+    const x = predicate[1]
+    const y = predicate[2]
+    let score = 0
+    let decading_interval = (parameters['MOVEMENT_DURATION']/1000)
+    if (parameters['PARCEL_DECADING_INTERVAL'] != 'infinite'){
+        decading_interval = decading_interval / parseInt(parameters['PARCEL_DECADING_INTERVAL'])
+    }else{
+        decading_interval = 0
+    }
+
+    let scorePackageCarriedByMe = 0
+    for (const [,s] of carriedByMe) {
+        scorePackageCarriedByMe = scorePackageCarriedByMe + s; // points that myAgent have 
+    }
+    score = scorePackageCarriedByMe - (carriedByMe.size * aStarPath(myDag, me.x+'|'+me.y, x+'|'+y).length * decading_interval)
+    
+    if(action == 'go_to'){
+        score = 1
+    }
+    if(action == 'go_pick_up'){
+        const node = findNearestDelivery(myMap, {x: x, y: y})
+        score =  score + parcels[predicate[3]] - (aStarPath(myDag, node, x+'|'+y).length * decading_interval * (carriedByMe.size + 1))
+
+        let vantage = Number.MAX_VALUE
+        const alpha = 3
+        const beta = 5
+        let scoreAdversarial = Number.MAX_VALUE
+
+        for(const [,a] of agentDetected){
+            let ourAdvantage = aStarPath(myDag, parseInt(a.x)+'|'+parseInt(a.y), x+'|'+y).length - aStarPath(myDag, me.x+'|'+me.y, x+'|'+y).length
+            ourAdvantage = alpha*ourAdvantage/(a.countSeen + 1)
+            
+            if(ourAdvantage < vantage){
+                vantage = ourAdvantage
+                scoreAdversarial = a.score
+            }
+        }
+        if (vantage < 0 && scoreAdversarial*beta > me.score){
+            score = score + vantage
+        }
+    }
+    if(action == 'delivery'){
+    
+    }
+    //console.log(predicate, score, parcels[predicate[3]], distanceString(x +'|'+ y, findNearestDelivery(myMap, {x: x, y: y}), distance({x,y}, me), Object.keys(carriedByMe).length, scorePackageCarriedByMe)
+    return score;
+}
+
+
+function UtilityFunction2(predicate, parent){
     const action = predicate[0]
     const x = predicate[1]
     const y = predicate[2]
@@ -476,42 +532,51 @@ function UtilityFunction(predicate, parent){
     let distance_score = distance({x,y}, me) * (parameters['MOVEMENT_DURATION']/1000)
     if (parameters['PARCEL_DECADING_INTERVAL'] != 'infinite'){
         decadig_interval = parseInt(parameters['PARCEL_DECADING_INTERVAL'])
-        distance_score = distance_score / decadig_interval
+        distance_score = distance_score / decadig_interval //decading points in order to arrive in x, y
+    } else {
+        distance_score = 0
     }
+
     let scoreNearestAgents = 0
     for(const [,a] of agentDetected){ //! agent could not be in this position
         const radius = 3
         if (a.x < x + radius && a.x > x - radius && a.y < y + radius && a.y > y - radius && me.x != a.x && me.y != a.y){
             console.log("Agent Near Parcels")
-            scoreNearestAgents = scoreNearestAgents + parameters['PARCEL_REWARD_AVG'] / 20
+            scoreNearestAgents = scoreNearestAgents + parameters['PARCEL_REWARD_AVG'] / 20 //point of agents near x y 
         }
     }
 
+    let scorePackageCarriedByMe = 0
+        for (const [,s] of carriedByMe) {
+            scorePackageCarriedByMe = scorePackageCarriedByMe + s; // points that myAgent have 
+        }
+    
+    let scoreGain = scorePackageCarriedByMe - Object.keys(carriedByMe).length*distance_score //points that myAgent have when arrive in x y 
     if(action == 'go_to'){
-        score = 4
+        score = 1
     }
     if (action == 'go_pick_up'){
-        console.log("-------------------",predicate, parcels[predicate[3]])
         const scorePackage = parcels[predicate[3]] - distance_score
         const node = findNearestDelivery(myMap, {x: x, y: y})
-        const parcel_distance_delivery_zone = distanceString(x +'|'+y, node)
+        const parcel_distance_delivery_zone = distanceString(x +'|'+y, node) * distance_score / distance({x,y}, me) // points that my Agent lose in order to go to the nearest delivery zone
         score = scorePackage
         score =  score - parcel_distance_delivery_zone
         if (scoreNearestAgents > 0){
             score = 0
         }
+        score = score + scoreGain - parcel_distance_delivery_zone * Object.keys(carriedByMe).length
+        /*
+        if (scoreGain + score - (Object.keys(carriedByMe).length + 1)* parcel_distance_delivery_zone > scorePackageCarriedByMe - Object.keys(carriedByMe).length*parcel_distance_delivery_zone){
+            score = parameters['PARCEL_REWARD_AVG']*10 + score - Object.keys(carriedByMe).length*parcel_distance_delivery_zone
+        }
+        */
     }
     if (action == 'delivery'){
-        let scorePackageCarriedByMe = 0
-        for (const [,score] of carriedByMe) {
-            scorePackageCarriedByMe = scorePackageCarriedByMe + score;
-        }
         console.log("------------------", predicate, scorePackageCarriedByMe)
         const alpha = 3
-        scorePackageCarriedByMe = scorePackageCarriedByMe - Object.keys(carriedByMe).length*distance_score
         //score = alpha*scorePackageCarriedByMe/distance({x,y}, me) + scorePackageCarriedByMe 
-        score = score- scoreNearestAgents
-        score = scorePackageCarriedByMe
+        //score = score - scoreNearestAgents
+        score = score + scoreGain
     }
 
 
