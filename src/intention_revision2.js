@@ -1,8 +1,9 @@
 import { DeliverooApi } from "@unitn-asa/deliveroo-js-client";
 
 const client = new DeliverooApi(
-    'https://deliveroojs.onrender.com',
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjhlMGVkZWM1ZWRmIiwibmFtZSI6IkNyaXN0YXZpZGEiLCJpYXQiOjE3MTUwNzYxNTR9.djF_N7kKbTxSi9crd9yezJVz9TsYlRWngabisbJmFtg'
+    //'https://deliveroojs2.onrender.com',
+    'http://localhost:8080',
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjZkYzg3NDBlMjJhIiwibmFtZSI6ImNpYW8iLCJpYXQiOjE3MTQ4Mjg3MTF9.rUawy6LtitVA8QQV2R2MY0XsEY_PtM0B4-jxml0JTPk'
 )
 
 function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
@@ -115,7 +116,8 @@ client.onMap( (x, y, deliveryMap) => {
 function aStarPath (dag, start, goal){
     const frontier = []
     const explored = []
-
+    let agents = []
+    
     class Node{
         node_name
         pathCost
@@ -147,6 +149,13 @@ function aStarPath (dag, start, goal){
     if(start.includes(".") || goal.includes(".")){
         return []
     }
+
+    for(const agent of agentDetected.values()){  
+        if( agent.countSeen < 10){
+            agents.push(agent.x+'|'+agent.y)
+        }
+    }
+    
     frontier.push(new Node(start, null, 0, distanceString(start, goal)))
     //console.log(frontier)
     while (frontier.length !== 0) {
@@ -158,7 +167,10 @@ function aStarPath (dag, start, goal){
 
         explored.push(lowestCostNode);
 
-        const neighbours = dag.getNeighbours(lowestCostNode.node_name);
+        let neighbours = dag.getNeighbours(lowestCostNode.node_name);
+        //console.log("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", neighbours)
+        neighbours = neighbours.filter(elem => !agents.includes(elem.node_name));
+        //console.log(neighbours, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         for (const childName of neighbours) {
             const childNode = new Node(childName,
                 lowestCostNode,
@@ -539,7 +551,7 @@ function UtilityFunction(predicate, parent){
 
     }
     if(action == 'delivery'){
-        if(scorePackageCarriedByMe > 5*parameters['PARCEL_REWARD_AVG']){
+        if (me.score >= 10*parameters['PARCEL_REWARD_AVG']){
             score = 1000
         }
     }
@@ -947,7 +959,7 @@ class AstarPlan extends Plan{
     }
 
     async execute ( go_to, x, y ) {
-        const path = aStarPath(myDag, me.x+'|'+me.y, x+'|'+y)
+        let path = aStarPath(myDag, me.x+'|'+me.y, x+'|'+y)
         //console.log(path)
         let countStacked = 3
         console.log("execute")
@@ -955,7 +967,23 @@ class AstarPlan extends Plan{
             
             if ( this.stopped ) throw ['stopped']; // if stopped then quit
 
+            let secondary_path = aStarPath(myDag, me.x+'|'+me.y, x+'|'+y)
+            let areEqual = true
+
+            if(path.length != secondary_path.length){
+                areEqual = false
+            }
+            for(let i = 0; i < path.length; i++){  
+                    if(path[0] != secondary_path[0]){
+                        areEqual = false
+                    }
+                }
+            if (areEqual == false){
+                path = secondary_path.slice()
+                //console.log(path,secondary_path)
+            }
             let coordinate = stringToCoordinate(path.shift())
+
             //console.log(coordinate[0],coordinate[1])
             let status_x = false;
             let status_y = false;
@@ -1005,7 +1033,6 @@ class AstarPlan extends Plan{
             } else if ( me.x == x && me.y == y ) {
                 // this.log('target reached');
             }
-            
         }
 
         return true;
