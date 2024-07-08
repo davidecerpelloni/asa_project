@@ -1,9 +1,24 @@
 import { DeliverooApi } from "@unitn-asa/deliveroo-js-client";
+import { PddlDomain, PddlAction, PddlProblem, PddlExecutor, onlineSolver, Beliefset } from "@unitn-asa/pddl-client";
+import fs from 'fs';
 
 const client = new DeliverooApi(
     'https://deliveroojs2.onrender.com',
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjI0NTQwYmQ0YjEzIiwibmFtZSI6ImNpYW8iLCJpYXQiOjE3MTM2MzA1NzV9.T4j-dRu8vfMff9pvdK0cTcjeKJrrcrTuhJRF4IYGajs'
 )
+
+function readFile ( path ) {
+    
+    return new Promise( (res, rej) => {
+
+        fs.readFile( path, 'utf8', (err, data) => {
+            if (err) rej(err)
+            else res(data)
+        })
+
+    })
+
+}
 
 function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
     const dx = Math.abs( Math.round(x1) - Math.round(x2) )
@@ -217,6 +232,42 @@ client.onConfig( (param) => {
     parameters = param
     console.log(parameters);
 } )
+
+var myBeliefset = new Beliefset();
+client.onMap((width, height, tiles) => {
+    for (let { x, y, delivery } of tiles) {
+        myBeliefset.declare('tile ' + 't' + x + '_' + y);
+        if (delivery) {
+            myBeliefset.declare('delivery ' + 't' + x + '_' + y);
+        }
+
+        // Find the tile to the right
+        let right = tiles.find(tile => tile.x === x + 1 && tile.y === y);
+        if (right) {
+            myBeliefset.declare('right ' + 't' + x + '_' + y + ' ' + 't' + right.x + '_' + right.y);
+        }
+
+        // Find the tile to the left
+        let left = tiles.find(tile => tile.x === x - 1 && tile.y === y);
+        if (left) {
+            myBeliefset.declare('left ' + 't' + x + '_' + y + ' ' + 't' + left.x + '_' + left.y);
+        }
+
+        // Find the tile above
+        let up = tiles.find(tile => tile.x === x && tile.y === y - 1);
+        if (up) {
+            myBeliefset.declare('up ' + 't' + x + '_' + y + ' ' + 't' + up.x + '_' + up.y);
+        }
+
+        // Find the tile below
+        let down = tiles.find(tile => tile.x === x && tile.y === y + 1);
+        if (down) {
+            myBeliefset.declare('down ' + 't' + x + '_' + y + ' ' + 't' + down.x + '_' + down.y);
+        }
+    }
+});
+
+
 
 function findNearestDelivery(map, object){
     let distance = Number.MAX_VALUE
@@ -941,31 +992,278 @@ class BlindMove extends Plan {
 
 let blackList = new Array()
 
+function pddl (){
+    const objects = myBeliefset.objects.join(' ');
+    let initialBeliefs = myBeliefset.toPddlString();
+    console.log("ciaooooooooooooooooo")
+    console.log(objects)
+    console.log(initialBeliefs)
+    console.log("ciaoooooooooo")
+}
 
 
-class PDDLPlan extends Plan {
+async function prova () {
+    var belief = new Beliefset();
+    belief.declare('switched-off ' + me.name);
+    belief.declare('switched-on light2');
+    var pddlProblem = new PddlProblem(
+        'lights',
+        belief.objects.join(' '),
+        belief.toPddlString(),
+        'and (switched-on ciao) (switched-on light2)'
+    )
+    
+    let problem = pddlProblem.toPddlString();
+    console.log( problem );
 
-    static isApplicableTo ( go_to, x, y ) {
+    let domain = await readFile('./domain-lights.pddl' );
+
+    var plan = await onlineSolver( domain, problem );
+    
+    const pddlExecutor = new PddlExecutor( { name: 'lightOn', executor: (l) => console.log('lighton '+l) } );
+    console.log("----------------------------")
+    pddlExecutor.exec( plan );
+    console.log("----------------------------")
+}
+
+let domain = await readFile('./new_domain.pddl');
+
+class PddlPlan extends Plan {
+
+    static isApplicableTo(go_to, x, y) {
         return go_to == 'go_to';
     }
 
-    async execute ( go_to, x, y ) {
+    async execute(go_to, x, y) {
+        let countStacked = 3; // Retry attempts for resolving stuck
+        let success = false;
+        //prova()
+        while (!success && countStacked > 0) {
+            // Remove previous declarations of other agents' presence
+            //for (let belief of myBeliefset.toPddlString().split('\n')) {
+            //    if (belief.startsWith('at agent_')) {
+            //        myBeliefset.undeclare(belief);
+            //    }
+            //}
+            // Declare the current position of the agent
+            myBeliefset.declare('me '+ me.name);
+            myBeliefset.declare('at ' + me.name + ' ' + 't' + me.x + '_' + me.y);
+
+            // Update the position of other agents in the belief set
+            //for (const agent of agentDetected.values()) {
+            //    if (agent.countSeen < 60) {
+            //        myBeliefset.declare('at agent_' + agent.id + ' ' + agent.x + '_' + agent.y);
+            //    }
+            //}
+
+            // Define the PDDL goal
+            let goal = 'at ' + me.name + ' ' + 't' + x + '_' + y;
+
+            // Create the PDDL problem
+            var pddlProblem = new PddlProblem(
+                'deliveroo',
+                myBeliefset.objects.join(' '),
+                myBeliefset.toPddlString(),
+                goal
+            );
+
+            let problem = pddlProblem.toPddlString();
+            //console.log(problem)
+
+            // Get the plan from the online solver
+            var plan = await onlineSolver(domain, problem);
+            console.log("ciaaaaaaaaaaoooo", plan)
+            const pddlExecutor = new PddlExecutor({
+                name: 'moveExecutor',
+                executor: async (action) => {
+                    console.log('Executing action: ' + action);
+
+                    let match = action.match(/\((MOVE-RIGHT|MOVE-LEFT|MOVE-UP|MOVE-DOWN) (\w+) (T\d+_\d+) (T\d+_\d+)\)/i);
+                    if (match) {
+                        let [_, act, agent, from, to] = match;
+                        let status = false;
+                        
+                        act = act.toLowerCase();
+
+                        if (act === 'move-right') status = await client.move('right');
+                        else if (act === 'move-left') status = await client.move('left');
+                        else if (act === 'move-up') status = await client.move('up');
+                        else if (act === 'move-down') status = await client.move('down');
+
+                        if (status) {
+                            let [, toX, toY] = to.match(/T(\d+)_(\d+)/);
+                            me.x = parseInt(toX);
+                            me.y = parseInt(toY);
+                        }
+
+                        return status;
+                    }
+                    return false;
+                }
+            });
+
+            for (let step of plan) {
+                if (this.stopped) throw ['stopped']; // If stopped, terminate
+
+                // Update agent positions before executing each step
+                for (const agent of agentDetected.values()) {
+                    if (agent.countSeen < 60) {
+                        myBeliefset.declare('at agent_' + agent.id + ' ' + agent.x + '_' + agent.y);
+                    }
+                }
+
+                let stepSuccess = await pddlExecutor.executor(step);
+
+                if (!stepSuccess) {
+                    this.log('stuck', countStacked);
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+                    break; // Exit the loop to recalculate the plan
+                } else if (me.x == x && me.y == y) {
+                    // Goal reached
+                    success = true;
+                    break;
+                }
+            }
+
+            countStacked -= 1;
+
+            if (me.x == x && me.y == y) {
+                success = true; // Goal reached, exit the loop
+            }
+        }
+
+        if (!success) {
+            throw 'stopped'; // If unable to reach the goal, terminate
+        }
+
+        return true;
+    }
+}
+
+class PddlPlan2 extends Plan{
+
+    static isApplicableTo ( go_to, x, y ) {
+        return go_to == 'go_to';
         
     }
 
+    async execute ( go_to, x, y ) {
+        // Remove previous declarations of other agents' presence
+        //for (let belief of myBeliefset.toPddlString().split('\n')) {
+        //    if (belief.startsWith('at agent_')) {
+        //        myBeliefset.undeclare(belief);
+        //    }
+        //}
+        // Declare the current position of the agent
+        //console.log("Coordinate", me.x, me.y)
+        //myBeliefset.declare('me '+ me.name);
+        //myBeliefset.declare('at ' + me.name + ' ' + 't' + me.x + '_' + me.y);
 
+        // Update the position of other agents in the belief set
+        //for (const agent of agentDetected.values()) {
+        //    if (agent.countSeen < 60) {
+        //        myBeliefset.declare('at agent_' + agent.id + ' ' + agent.x + '_' + agent.y);
+        //    }
+        //}
+
+        // Define the PDDL goal
+        let goal = 'at ' + me.name + ' ' + 't' + x + '_' + y;
+
+        // Create the PDDL problem
+        var pddlProblem = new PddlProblem(
+            'deliveroo',
+            myBeliefset.objects.join(' ') + ' ' + me.name,
+            myBeliefset.toPddlString() + ' ' + '(me ' + me.name + ')' + '(at ' + me.name + ' ' + 't' + me.x + '_' + me.y + ')',
+            goal
+        );
+
+        let problem = pddlProblem.toPddlString();
+        // Get the plan from the online solver
+        var plan = await onlineSolver(domain, problem);
+        let coordinates = []
+        plan.forEach(action => {
+            let end = action.args[2].split('_');   
+          
+            coordinates.push({
+              x: parseInt(end[0].substring(1)), 
+              y: parseInt(end[1])                  
+            });
+          });
+        let countStacked = 3
+        console.log("execute")
+        console.log(coordinates)
+        while ( me.x != x || me.y != y ) {
+            
+            if ( this.stopped ) throw ['stopped']; // if stopped then quit
+
+            let coordinate = coordinates.shift()
+            //console.log(coordinate[0],coordinate[1])
+            let status_x = false;
+            let status_y = false;
+
+            // this.log('me', me, 'xy', x, y);
+            
+            if(coordinate.x == me.x && coordinate.y == me.y){
+                continue;
+            }
+
+            if ( coordinate.x > me.x )
+                status_x = await client.move('right')
+                // status_x = await this.subIntention( 'go_to', {x: me.x+1, y: me.y} );
+            else if ( coordinate.x < me.x )
+                status_x = await client.move('left')
+                // status_x = await this.subIntention( 'go_to', {x: me.x-1, y: me.y} );
+
+            if (status_x) {
+                me.x = status_x.x;
+                me.y = status_x.y;
+            }
+
+            if ( this.stopped ) throw ['stopped']; // if stopped then quit
+
+            if ( coordinate.y > me.y )
+                status_y = await client.move('up')
+                // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y+1} );
+            else if ( coordinate.y < me.y )
+                status_y = await client.move('down')
+                // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y-1} );
+
+            if (status_y) {
+                me.x = status_y.x;
+                me.y = status_y.y;
+            }
+            
+            if ( ! status_x && ! status_y) {
+                this.log('stucked ', countStacked);
+                //await this.subIntention( 'go_to', {x: x, y: y} );
+                await timeout(1000)
+                if(countStacked <= 0){
+                    throw 'stopped'; //! modificato da stucked
+                }else{
+                    countStacked -= 1;
+                }
+
+            } else if ( me.x == x && me.y == y ) {
+                // this.log('target reached');
+            }
+            
+        }
+
+        return true;
+
+    }
 }
-
 
 class AstarPlan extends Plan{
 
     static isApplicableTo ( go_to, x, y ) {
         return go_to == 'go_to';
+        
     }
 
     async execute ( go_to, x, y ) {
+        prova()
         const path = aStarPath(myDag, me.x+'|'+me.y, x+'|'+y)
-        //console.log(path)
         let countStacked = 3
         console.log("execute")
         while ( me.x != x || me.y != y ) {
@@ -1039,6 +1337,6 @@ function timeout(mseconds) {
   }
 // plan classes are added to plan library 
 planLibrary.push( GoPickUp )
-planLibrary.push( AstarPlan )
+planLibrary.push( PddlPlan2 )
 planLibrary.push( GoDelivery )
 planLibrary.push( MoveRandom )

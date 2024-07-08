@@ -1,9 +1,24 @@
 import { DeliverooApi } from "@unitn-asa/deliveroo-js-client";
+import { PddlDomain, PddlAction, PddlProblem, PddlExecutor, onlineSolver, Beliefset } from "@unitn-asa/pddl-client";
+import fs from 'fs';
 
 const client = new DeliverooApi(
     'https://deliveroojs2.onrender.com',
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjI0NTQwYmQ0YjEzIiwibmFtZSI6ImNpYW8iLCJpYXQiOjE3MTM2MzA1NzV9.T4j-dRu8vfMff9pvdK0cTcjeKJrrcrTuhJRF4IYGajs'
 )
+
+function readFile ( path ) {
+    
+    return new Promise( (res, rej) => {
+
+        fs.readFile( path, 'utf8', (err, data) => {
+            if (err) rej(err)
+            else res(data)
+        })
+
+    })
+
+}
 
 function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
     const dx = Math.abs( Math.round(x1) - Math.round(x2) )
@@ -218,6 +233,42 @@ client.onConfig( (param) => {
     console.log(parameters);
 } )
 
+var myBeliefset = new Beliefset();
+client.onMap((width, height, tiles) => {
+    for (let { x, y, delivery } of tiles) {
+        myBeliefset.declare('tile ' + 't' + x + '_' + y);
+        if (delivery) {
+            myBeliefset.declare('delivery ' + 't' + x + '_' + y);
+        }
+
+        // Find the tile to the right
+        let right = tiles.find(tile => tile.x === x + 1 && tile.y === y);
+        if (right) {
+            myBeliefset.declare('right ' + 't' + x + '_' + y + ' ' + 't' + right.x + '_' + right.y);
+        }
+
+        // Find the tile to the left
+        let left = tiles.find(tile => tile.x === x - 1 && tile.y === y);
+        if (left) {
+            myBeliefset.declare('left ' + 't' + x + '_' + y + ' ' + 't' + left.x + '_' + left.y);
+        }
+
+        // Find the tile above
+        let up = tiles.find(tile => tile.x === x && tile.y === y - 1);
+        if (up) {
+            myBeliefset.declare('up ' + 't' + x + '_' + y + ' ' + 't' + up.x + '_' + up.y);
+        }
+
+        // Find the tile below
+        let down = tiles.find(tile => tile.x === x && tile.y === y + 1);
+        if (down) {
+            myBeliefset.declare('down ' + 't' + x + '_' + y + ' ' + 't' + down.x + '_' + down.y);
+        }
+    }
+});
+
+
+
 function findNearestDelivery(map, object){
     let distance = Number.MAX_VALUE
     let node = null
@@ -230,6 +281,8 @@ function findNearestDelivery(map, object){
     }
     return node
 }
+
+
 
 function findFurthestDelivery(map, object){
     let distance = Number.MIN_VALUE
@@ -280,7 +333,7 @@ client.onParcelsSensing( parcels => {
         myAgent.push( ['delivery', coordinate[0], coordinate[1]])
     }else if(options.length==0 && carriedByMe.size == 0){
         const coordinate = stringToCoordinate(findFurthestDelivery(myMap, me))
-        //myAgent.removeGoTo()
+        //myAgent.removeGoTo() //? funziona?
         myAgent.push(['go_to', coordinate[0], coordinate[1]])
         /*
         if (me.x % 1 == 0 && me.y % 1 == 0){
@@ -297,6 +350,7 @@ client.onParcelsSensing( parcels => {
     /**
      * Options filtering
      */
+    //! Astar o distance?
     let best_option;
     let nearest = Number.MAX_VALUE;
     for (const option of options) {
@@ -331,7 +385,7 @@ client.onAgentsSensing( (agents) =>{
             agentDetected.set(agent.id, agent);
         }
     }
-    console.log(agentDetected)
+    console.log("Agent_detected: ", agentDetected)
     //console.log("Agents Sensing--------",agentDetected);
 } )
 // client.onYou( agentLoop )
@@ -346,8 +400,16 @@ class IntentionRevision {
     get intention_queue () {
         return this.#intention_queue;
     }
-    async removeDelivery (){
+    removeDelivery (){
         this.#intention_queue = this.#intention_queue.filter((elem) => elem.predicate[0] != 'delivery')
+    }
+
+    removeGoTo(){
+        this.#intention_queue = this.#intention_queue.filter((elem) => elem.predicate[0] != 'go_to')
+    }
+
+    set intention_queue ( new_queue ) {
+        this.#intention_queue = new_queue;
     }
 
     async loop ( ) {
@@ -449,7 +511,7 @@ class IntentionRevisionReplace extends IntentionRevision {
         }
         if(me.x % 1 == 0 && me.y % 1 == 0){
             this.intention_queue.sort((a, b) => UtilityFunction(b.predicate, b.parent) - UtilityFunction(a.predicate, a.parent))
-            this.intention_queue.filter(item => { return UtilityFunction(item.predicate, item.parent) > 0; }); //! non funziona; restituisce un valore ma non modifica la coda
+            this.intention_queue = this.intention_queue.filter(item => { return UtilityFunction(item.predicate, item.parent) > 0; }); //* non funziona; restituisce un valore ma non modifica la coda
             see_queue(this.intention_queue)
         }
         const first2 = this.intention_queue[0];
@@ -540,7 +602,10 @@ function UtilityFunction(predicate, parent){
 
     }
     if(action == 'delivery'){
-        if(scorePackageCarriedByMe > 5*parameters['PARCEL_REWARD_AVG']){
+        if(scorePackageCarriedByMe > 10*parameters['PARCEL_REWARD_AVG']){
+            score = 1000
+        }
+        if(me.x == x && me.y == y){
             score = 1000
         }
     }
@@ -548,103 +613,6 @@ function UtilityFunction(predicate, parent){
     return score;
 }
 
-
-function UtilityFunction2(predicate, parent){
-    const action = predicate[0]
-    const x = predicate[1]
-    const y = predicate[2]
-    let score = 0
-    let decadig_interval = 0
-    let distance_score = distance({x,y}, me) * (parameters['MOVEMENT_DURATION']/1000)
-    if (parameters['PARCEL_DECADING_INTERVAL'] != 'infinite'){
-        decadig_interval = parseInt(parameters['PARCEL_DECADING_INTERVAL'])
-        distance_score = distance_score / decadig_interval //decading points in order to arrive in x, y
-    } else {
-        distance_score = 0
-    }
-
-    let scoreNearestAgents = 0
-    for(const [,a] of agentDetected){ //! agent could not be in this position
-        const radius = 3
-        if (a.x < x + radius && a.x > x - radius && a.y < y + radius && a.y > y - radius && me.x != a.x && me.y != a.y){
-            console.log("Agent Near Parcels")
-            scoreNearestAgents = scoreNearestAgents + parameters['PARCEL_REWARD_AVG'] / 20 //point of agents near x y 
-        }
-    }
-
-    let scorePackageCarriedByMe = 0
-        for (const [,s] of carriedByMe) {
-            scorePackageCarriedByMe = scorePackageCarriedByMe + s; // points that myAgent have 
-        }
-    
-    let scoreGain = scorePackageCarriedByMe - Object.keys(carriedByMe).length*distance_score //points that myAgent have when arrive in x y 
-    if(action == 'go_to'){
-        score = 1
-    }
-    if (action == 'go_pick_up'){
-        const scorePackage = parcels[predicate[3]] - distance_score
-        const node = findNearestDelivery(myMap, {x: x, y: y})
-        const parcel_distance_delivery_zone = distanceString(x +'|'+y, node) * distance_score / distance({x,y}, me) // points that my Agent lose in order to go to the nearest delivery zone
-        score = scorePackage
-        score =  score - parcel_distance_delivery_zone
-        if (scoreNearestAgents > 0){
-            score = 0
-        }
-        score = score + scoreGain - parcel_distance_delivery_zone * Object.keys(carriedByMe).length
-        /*
-        if (scoreGain + score - (Object.keys(carriedByMe).length + 1)* parcel_distance_delivery_zone > scorePackageCarriedByMe - Object.keys(carriedByMe).length*parcel_distance_delivery_zone){
-            score = parameters['PARCEL_REWARD_AVG']*10 + score - Object.keys(carriedByMe).length*parcel_distance_delivery_zone
-        }
-        */
-    }
-    if (action == 'delivery'){
-        console.log("------------------", predicate, scorePackageCarriedByMe)
-        const alpha = 3
-        //score = alpha*scorePackageCarriedByMe/distance({x,y}, me) + scorePackageCarriedByMe 
-        //score = score - scoreNearestAgents
-        score = score + scoreGain
-    }
-
-
-
-    //let score = 0
-    //let action_score = 1
-    //let parent_score = 1
-    //let agents_near_parcels_score = 20
-    //let parcel_score = 0
-    //let parcel_distance_delivery_zone = 20
-    //let number_package = carriedByMe.size
-    //? if delivery -> sum(carriedByMe) >< utility pickup 
-
-    /*
-    if (action == 'go_to') { //CONTROLLARE GO PICK UP //controllare pickup
-        score = 0.5
-    }
-    
-    if (action == 'go_pick_up'){
-        const element = Array.from(parcels.values()).find(elemento => {
-            return elemento.x === x && elemento.y === y;
-          });
-        parcel_score = element.score
-        const node = findNearestDelivery(myMap, {x: element.x, y: element.y})
-        parcel_distance_delivery_zone = distanceString(element.x +'|'+element.y, node)
-        let bestDistance = Number.MAX_VALUE
-        agentDetected.forEach((agent, id) => {
-            const distance = distance([agent.x, agent.y], [element.x, element.y])
-            if (bestDistance > distance){
-                bestDistance = distance
-            }
-        })
-        agents_near_parcels_score = bestDistance
-    }                                                                   //
-    score = (action_score && parent_score)*(parcel_score/distance_score)*(1/parcel_distance_delivery_zone) // distance = 5  score = 40 //distance = 10 score = 50
-    if(agents_near_parcels_score < 3){
-        score = 0
-    }
-    */
-    // todo togliere noi come agent negli agent vicini al pacchetto
-    return score;
-}
 
 /**
  * Start intention revision loop
@@ -803,7 +771,7 @@ class GoPickUp extends Plan {
         return go_pick_up == 'go_pick_up';
     }
 
-    async execute ( go_pick_up, x, y) {
+    async execute ( go_pick_up, x, y, id) {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await this.subIntention( ['go_to', x, y] );
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
@@ -939,21 +907,300 @@ class BlindMove extends Plan {
     }
 }
 
-let blackList = new Array()
 
 
+async function prova () {
+    var belief = new Beliefset();
+    belief.declare('switched-off ' + me.name);
+    belief.declare('switched-on light2');
+    var pddlProblem = new PddlProblem(
+        'lights',
+        belief.objects.join(' '),
+        belief.toPddlString(),
+        'and (switched-on ciao) (switched-on light2)'
+    )
+    
+    let problem = pddlProblem.toPddlString();
+    console.log( problem );
 
-class PDDLPlan extends Plan {
+    let domain = await readFile('./domain-lights.pddl' );
+
+    var plan = await onlineSolver( domain, problem );
+    
+    const pddlExecutor = new PddlExecutor( { name: 'lightOn', executor: (l) => console.log('lighton '+l) } );
+    console.log("----------------------------")
+    pddlExecutor.exec( plan );
+    console.log("----------------------------")
+}
+
+let domain = await readFile('./new_domain.pddl');
+
+class PddlPlan extends Plan{
 
     static isApplicableTo ( go_to, x, y ) {
         return go_to == 'go_to';
-    }
-
-    async execute ( go_to, x, y ) {
         
     }
 
+    async execute ( go_to, x, y ) {
+        // Define the PDDL goal
+        let goal = 'at ' + me.name + ' ' + 't' + x + '_' + y;
 
+        // Create the PDDL problem
+        var pddlProblem = new PddlProblem(
+            'deliveroo',
+            myBeliefset.objects.join(' ') + ' ' + me.name,
+            myBeliefset.toPddlString() + ' ' + '(me ' + me.name + ')' + '(at ' + me.name + ' ' + 't' + me.x + '_' + me.y + ')',
+            goal
+        );
+
+        let problem = pddlProblem.toPddlString();
+        // Get the plan from the online solver
+        var plan = await onlineSolver(domain, problem);
+        let coordinates = []
+        plan.forEach(action => {
+            let end = action.args[2].split('_');   
+          
+            coordinates.push({
+              x: parseInt(end[0].substring(1)), 
+              y: parseInt(end[1])                  
+            });
+          });
+        let countStacked = 3
+        console.log("execute")
+        console.log(coordinates)
+        while ( me.x != x || me.y != y ) {
+            
+            if ( this.stopped ) throw ['stopped']; // if stopped then quit
+
+            let coordinate = coordinates.shift()
+            //console.log(coordinate[0],coordinate[1])
+            let status_x = false;
+            let status_y = false;
+
+            // this.log('me', me, 'xy', x, y);
+            
+            if(coordinate.x == me.x && coordinate.y == me.y){
+                continue;
+            }
+
+            if ( coordinate.x > me.x )
+                status_x = await client.move('right')
+                // status_x = await this.subIntention( 'go_to', {x: me.x+1, y: me.y} );
+            else if ( coordinate.x < me.x )
+                status_x = await client.move('left')
+                // status_x = await this.subIntention( 'go_to', {x: me.x-1, y: me.y} );
+
+            if (status_x) {
+                me.x = status_x.x;
+                me.y = status_x.y;
+            }
+
+            if ( this.stopped ) throw ['stopped']; // if stopped then quit
+
+            if ( coordinate.y > me.y )
+                status_y = await client.move('up')
+                // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y+1} );
+            else if ( coordinate.y < me.y )
+                status_y = await client.move('down')
+                // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y-1} );
+
+            if (status_y) {
+                me.x = status_y.x;
+                me.y = status_y.y;
+            }
+            
+            if ( ! status_x && ! status_y) {
+                this.log('stucked ', countStacked);
+                //await this.subIntention( 'go_to', {x: x, y: y} );
+                await timeout(1000)
+                if(countStacked <= 0){
+                    throw 'stopped'; //! modificato da stucked
+                }else{
+                    countStacked -= 1;
+                }
+
+            } else if ( me.x == x && me.y == y ) {
+                // this.log('target reached');
+            }
+            
+        }
+
+        return true;
+
+    }
+}
+
+
+
+class PddlGoPickUp extends Plan {
+
+    static isApplicableTo(go_pick_up, x, y, id) {
+        return go_pick_up == 'go_pick_up';
+    }
+
+    async execute(go_pick_up, x, y, id) {
+        // Define the PDDL goal
+        let goal = 'and (holding ' + me.name + ' p' + id + ' )(not (at p' + id + ' ' + 't' + x + '_' + y + '))';
+        // Create the PDDL problem
+        var pddlProblem = new PddlProblem(
+            'deliveroo',
+            myBeliefset.objects.join(' ') + ' ' + me.name + ' p' + id,
+            myBeliefset.toPddlString() + ' ' + '(me ' + me.name + ')' + '(at ' + me.name + ' ' + 't' + me.x + '_' + me.y + ')' + '(at p' + id + ' ' + 't' + x + '_' + y + ')' + '(parcel p' + id + ')',
+            goal
+        );
+
+        let problem = pddlProblem.toPddlString();
+        // Get the plan from the online solver
+        var plan = await onlineSolver(domain, problem);
+        let coordinates = [];
+
+        plan.forEach(action => {
+            let end = action.args[2].split('_');
+            coordinates.push({
+                action: action.action,
+                x: parseInt(end[0].substring(1)),
+                y: parseInt(end[1])
+            });
+        });
+
+        let countStacked = 3;
+        console.log("execute");
+
+        while (coordinates.length > 0) {
+            if (this.stopped) throw ['stopped']; // if stopped then quit
+
+            let coordinate = coordinates.shift();
+            let status_x = false;
+            let status_y = false;
+
+            if (coordinate.action === 'PICK-UP') {
+                await client.pickup();
+            }
+
+            if (coordinate.x > me.x)
+                status_x = await client.move('right');
+            else if (coordinate.x < me.x)
+                status_x = await client.move('left');
+
+            if (status_x) {
+                me.x = status_x.x;
+                me.y = status_x.y;
+            }
+
+            if (this.stopped) throw ['stopped']; // if stopped then quit
+
+            if (coordinate.y > me.y)
+                status_y = await client.move('up');
+            else if (coordinate.y < me.y)
+                status_y = await client.move('down');
+
+            if (status_y) {
+                me.x = status_y.x;
+                me.y = status_y.y;
+            }
+
+            if (!status_x && !status_y) {
+                this.log('stucked ', countStacked);
+                await timeout(1000);
+                if (countStacked <= 0) {
+                    throw 'stopped'; // modified from stucked
+                } else {
+                    countStacked -= 1;
+                }
+            }
+        }
+
+        return true;
+    }
+}
+
+
+class PddlGoDelivery extends Plan {
+
+    static isApplicableTo(delivery, x, y) {
+        return delivery == 'delivery';
+    }
+
+    async execute(delivery, x, y) {
+        // Define the PDDL goal for delivery
+        let id = carriedByMe.keys().next().value;
+        let deliveryGoal = 'and (at p' + id + ' t' + x + '_' + y + ') (not (holding ' + me.name + ' p' + id + '))';
+
+        // Create the PDDL problem for delivery
+        var pddlDeliveryProblem = new PddlProblem(
+            'deliveroo',
+            myBeliefset.objects.join(' ') + ' ' + me.name + ' p' + id,
+            myBeliefset.toPddlString() + ' ' + '(me ' + me.name + ')' + '(at ' + me.name + ' ' + 't' + me.x + '_' + me.y + ')' + '(holding ' + me.name + ' p' + id + ')' + '(delivery t' + x + '_' + y + ')' + '(parcel p' + id + ')',
+            deliveryGoal
+        );
+
+        let deliveryProblem = pddlDeliveryProblem.toPddlString();
+        // Get the delivery plan from the online solver
+        var deliveryPlan = await onlineSolver(domain, deliveryProblem);
+        let deliveryCoordinates = [];
+
+        deliveryPlan.forEach(action => {
+            let end = action.args[2].split('_');
+            deliveryCoordinates.push({
+                action: action.action,
+                x: parseInt(end[0].substring(1)),
+                y: parseInt(end[1])
+            });
+        });
+
+        let countStacked = 3;
+        console.log("execute delivery");
+
+        // Execute the delivery plan
+        while (deliveryCoordinates.length > 0) {
+            if (this.stopped) throw ['stopped']; // if stopped then quit
+
+            let coordinate = deliveryCoordinates.shift();
+            let status_x = false;
+            let status_y = false;
+
+            if (coordinate.action === 'DELIVER') {
+                await client.putdown();
+                await modifyGlobalVariables();
+                break; // stop the loop after delivery
+            }
+
+            if (coordinate.x > me.x)
+                status_x = await client.move('right');
+            else if (coordinate.x < me.x)
+                status_x = await client.move('left');
+
+            if (status_x) {
+                me.x = status_x.x;
+                me.y = status_x.y;
+            }
+
+            if (this.stopped) throw ['stopped']; // if stopped then quit
+
+            if (coordinate.y > me.y)
+                status_y = await client.move('up');
+            else if (coordinate.y < me.y)
+                status_y = await client.move('down');
+
+            if (status_y) {
+                me.x = status_y.x;
+                me.y = status_y.y;
+            }
+
+            if (!status_x && !status_y) {
+                this.log('stucked ', countStacked);
+                await timeout(1000);
+                if (countStacked <= 0) {
+                    throw 'stopped'; // modified from stucked
+                } else {
+                    countStacked -= 1;
+                }
+            }
+        }
+
+        return true;
+    }
 }
 
 
@@ -961,11 +1208,11 @@ class AstarPlan extends Plan{
 
     static isApplicableTo ( go_to, x, y ) {
         return go_to == 'go_to';
+        
     }
 
     async execute ( go_to, x, y ) {
         const path = aStarPath(myDag, me.x+'|'+me.y, x+'|'+y)
-        //console.log(path)
         let countStacked = 3
         console.log("execute")
         while ( me.x != x || me.y != y ) {
