@@ -2,11 +2,16 @@ import { DeliverooApi } from "@unitn-asa/deliveroo-js-client";
 import { PddlDomain, PddlAction, PddlProblem, PddlExecutor, onlineSolver, Beliefset } from "@unitn-asa/pddl-client";
 import fs from 'fs';
 
+//agent2
+
+// creation of the client object
 const client = new DeliverooApi(
-    'https://deliveroojs2.onrender.com',
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjI0NTQwYmQ0YjEzIiwibmFtZSI6ImNpYW8iLCJpYXQiOjE3MTM2MzA1NzV9.T4j-dRu8vfMff9pvdK0cTcjeKJrrcrTuhJRF4IYGajs'
+    //'https://deliveroojs2.onrender.com',
+    'http://localhost:8080',
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjA0ZjY5NjZjOTU2IiwibmFtZSI6ImFnZW50MiIsImlhdCI6MTcyMDY4MjE3NH0.DzA6kUDi6seZeceXi18GWYGLeHzRV5vMlxAepH6cj5U'
 )
 
+// Function to read the domain PDDL file
 function readFile ( path ) {
     
     return new Promise( (res, rej) => {
@@ -20,12 +25,16 @@ function readFile ( path ) {
 
 }
 
+// Function to calculate the Manhattan distance between two points 
+// that are represented as objects with x and y properties
 function distance( {x:x1, y:y1}, {x:x2, y:y2}) {
     const dx = Math.abs( Math.round(x1) - Math.round(x2) )
     const dy = Math.abs( Math.round(y1) - Math.round(y2) )
     return dx + dy;
 }
 
+// Function to calculate the Manhattan distance between two nodes
+// Each node is represented as a string with the format 'x|y'
 function distanceString(node1, node2){
     const coordinate1 = node1.split("|");
     const coordinate2 = node2.split("|");
@@ -33,16 +42,116 @@ function distanceString(node1, node2){
     const dy = Math.abs( Math.round(coordinate1[1]) - Math.round(coordinate2[1]) )
     return dx + dy;
 }
-
+// Function to convert a node to a point object
 function stringToCoordinate(node){
     return node.split("|");
 }
 
+// Verify if the x and y coordinates of intention1 and intention2 are equal
+function areIntentionsEqual(intention1, intention2) {
+    return intention1.x === intention2.x && intention1.y === intention2.y;
+}
+
+//Implementation of the message passing system
+let myPartnerId; //id of the partner
+const parcel_timers = new Map(); //contain map <id_parcel, last_time_detection>
+let broadcast_id = true; //if true, the agent will broadcast its id to be recognized by the partner
+let GoalReachingCoordinate = {x : -1, y : -1} //coordinate of the goal that the agent is trying to reach
+
+
+// callback fuction used to receive messages from the other agent
+client.onMsg(async (id, name, msg, reply) => {
+    // if the agent receives a message from an agent with the name 'agent2' (our partner)
+    if (myPartnerId == undefined && name == 'agent1'){  // receive partner ID for first time
+        myPartnerId = id; //save the partner id
+        console.log('PARTNER ID', myPartnerId)      
+        client.say(myPartnerId, 'I ve got your id.')
+        broadcast_id = false; //stop broadcasting the id
+
+    }
+    
+    if(name === "agent1"){  // only react on messages from partner
+        let msg_split = msg.split(",");
+
+        // Delivery - check if I can go to a certain position
+        if(msg_split[2] === 'can you go there?'){
+            let reach = await createPddlProblem(parseFloat(msg_split[0]), parseFloat(msg_split[1]))
+            
+            // if the agent can reach the position then reply with true, otherwise with false
+            if(reach.length > 0){
+                reply(String(true));
+            }
+            else {
+                reply(String(false));
+            }
+        }
+
+        // Pickup - tell my partner where I am going
+        if (msg_split[2] == 'where are you going?'){
+            // Get the current coordinates of the agent
+           let { x, y } = GoalReachingCoordinate;
+           let currentCoordinates = `${x},${y}`;
+
+           if (reply) {
+               try {
+                   // Send back the current coordinates
+                   reply(currentCoordinates);
+               } catch (error) {
+                   console.error(error);
+               }
+           }
+       }
+        
+        // If the agent receives 'Parcel sensing' message from the partner
+        // I save all the detected parcels from my partner in the parcels map
+        if (msg_split[0] === 'Parcel sensing'){
+            for (var i=0; i<parseInt(msg_split[1]); i++){
+                var parcel = msg_split[2 + i].split("-");
+                var id = parcel[0];
+                var x = parseInt(parcel[1]);
+                var y = parseInt(parcel[2]);
+                var carriedBy;
+                if (parcel[3] === 'null'){
+                    carriedBy = null;
+                }
+                else {
+                    carriedBy = parcel[3];
+                }
+                var reward = parseInt(parcel[4]);
+                parcels.set(id, {id, x, y, carriedBy, reward});
+                parcel_timers.set(id, Date.now());
+            }
+
+        }
+
+        // If the agent receives 'Agents sensing' message from the partner
+        // I save all the detected agents from my partner in the agentDetected map
+        if (msg_split[0] === 'Agents sensing'){
+            for (var i=0; i<parseInt(msg_split[1]); i++){
+                var agent = msg_split[2 + i].split("-");
+                var id = agent[0];
+                var name = agent[1];
+                var x = parseFloat(agent[2]);
+                var y = parseFloat(agent[3]);
+                var score = parseInt(agent[4]);
+
+                agentDetected.set(id, {id, name, x, y, score});
+            }
+        }
+    }
+});
+
+// class that represents my map: it contain:
+// - the dimension of the map
+// - the matrix of the map
+// - the delivery tiles
+// - the spawner tiles
 class MyMap {
     #dimX
     #dimY
     #matrixTiles
     #deliveryTiles
+    #spawnerTiles
     getDimension(){
         return [this.#dimX, this.#dimY]
     }
@@ -53,6 +162,10 @@ class MyMap {
     getDelivery(){
         return this.#deliveryTiles
     }
+    getSpawner(){
+        return this.#spawnerTiles
+    }
+    // function that returns the neighbours of a tile
     getNeighbours(x, y){
         const array = []
         if (this.#matrixTiles[x - 1] !== undefined && this.#matrixTiles[x - 1][y] !== undefined && this.#matrixTiles[x-1][y]!=0) {
@@ -79,6 +192,7 @@ class MyMap {
         this.#dimY = y;
         this.#matrixTiles = Array.from({ length: this.#dimX }, () => Array(this.#dimY).fill(0));
         this.#deliveryTiles = []
+        this.#spawnerTiles = []
         for (const tile of arrayTiles) {
             let temp = 0
             if (tile.delivery){
@@ -86,6 +200,7 @@ class MyMap {
                 this.#deliveryTiles.push(tile.x+'|'+tile.y)
             } else if (!tile.delivery && tile.parcelSpawner){
                 temp = 1
+                this.#spawnerTiles.push(tile.x+'|'+tile.y)
             } else if (!tile.delivery && !tile.parcelSpawner){
                 temp = 3
             }
@@ -96,6 +211,9 @@ class MyMap {
 }
 
 
+// class that represents the Directed Acyclic Graph (DAG) of the map
+// it contains a map that has as key the node of the map and as value the neighbours of that node
+// this dag is used in order to have a more efficient path finding algorithm (A*)
 class Dag{
     #dag
 
@@ -103,7 +221,7 @@ class Dag{
         this.#dag = new Map()
         this.initializeDag(map)
     }
-
+    // function that initializes the DAG
     initializeDag(map){
         for(var i = 0; i < map.getDimension()[0]; i++){
             for (var j = 0; j<map.getDimension()[1]; j++){
@@ -113,24 +231,26 @@ class Dag{
             }
         }
     }
-
+    // function that returns the neighbours of a node
     getNeighbours(string){
         return this.#dag.get(string)
     }
 }
 
-let myMap = {}
-let myDag = {}
+let myMap = {};
+let myDag = {};
 
+// populate myMap and myDag with the information about the grid
 client.onMap( (x, y, deliveryMap) => {
-    myMap = new MyMap(x, y, deliveryMap)
-    myDag = new Dag(myMap)
+    myMap = new MyMap(x, y, deliveryMap);
+    myDag = new Dag(myMap);
 })
 
+// function that returns the path from the start node to the goal node
 function aStarPath (dag, start, goal){
     const frontier = []
     const explored = []
-
+    //creation of the node class that contains the information about the node
     class Node{
         node_name
         pathCost
@@ -145,11 +265,11 @@ function aStarPath (dag, start, goal){
             this.completeDistance = pathCost + heuristic
         }
     }
-
+    // function that returns the index of a node in an array
     function indexInArray(node, array){
         return array.findIndex((element) => element.node_name == node.node_name)
     }
-
+    // function that returns the solution of the A* algorithm
     function solution(node){
         const array=[]
         while(node != null){
@@ -158,22 +278,26 @@ function aStarPath (dag, start, goal){
         }
         return array.reverse()
     }
-
+    // check if the start and goal nodes are valid (for example 15.4|5.6 is not valid)
     if(start.includes(".") || goal.includes(".")){
         return []
     }
+    // add the start node to the frontier
     frontier.push(new Node(start, null, 0, distanceString(start, goal)))
-    //console.log(frontier)
+    // while the frontier is not empty
     while (frontier.length !== 0) {
+        // sort the frontier based on the complete distance of the nodes
         frontier.sort((a, b) => a.completeDistance - b.completeDistance);
+        // get the node with the lowest complete distance
         const lowestCostNode = frontier.shift();
         if (lowestCostNode.node_name === goal) {
             return solution(lowestCostNode);
         }
-
+        // add the node to the explored set
         explored.push(lowestCostNode);
-
+        // get the neighbours of the node
         const neighbours = dag.getNeighbours(lowestCostNode.node_name);
+        // for each neighbour of the node create a new node and add it to the frontier
         for (const childName of neighbours) {
             const childNode = new Node(childName,
                 lowestCostNode,
@@ -192,48 +316,102 @@ function aStarPath (dag, start, goal){
     return [];
 
 }
-//! blocco agent quando gli rubano più pacchetti
-/**
- * Beliefset revision function
- */
+
+// variable that contains my information (id, name, x, y, score)
 const me = {};
 
+// callback function that is called when the agent receives the information about itself
 client.onYou( ( {id, name, x, y, score} ) => {
     me.id = id
     me.name = name
     me.x = x
     me.y = y
     me.score = score
-    //console.log(x, y, myDag.getNeighbours(x+'|'+y))
-    //console.log(aStarPath(myDag, x+'|'+y, 15+'|'+5))
 })
+
+// map that contains the parcels that are detected by the agent 
+// and the one that sensed by our partner 
 const parcels = new Map();
+// map that contains the parcels that are carried by the agent
 let carriedByMe = new Map()
 
+//function that reset the parcels that are carried by the agent
+//when the agent delivers them
 async function modifyGlobalVariables(){
     carriedByMe = new Map()
 }
 
-client.onParcelsSensing( async ( perceived_parcels ) => {
-    for (const p of perceived_parcels) {
-        parcels[p.id] = p.reward
-        if (Object.keys(parcels).length > 20){
-            let keys = Object.keys(parcels)
-            let toDelete = keys[0]
-            delete parcels[toDelete]
-        }
-    }
-    //console.log("--------------")
-    //console.log(parcels)
-} )
+//function used to create the plan in order to reach a certain position
+//return a list of action that the agent has to do in order to reach the goal
+// or an empty list if the agent cannot reach the goal
+async function createPddlProblem(x,y){
+    let goal = 'at ' + me.name + ' ' + 't' + x + '_' + y;
 
+        // Create the PDDL problem
+        var pddlProblem = new PddlProblem(
+            'deliveroo',
+            myBeliefset.objects.join(' ') + ' ' + me.name,
+            myBeliefset.toPddlString() + ' ' + '(me ' + me.name + ')' + '(at ' + me.name + ' ' + 't' + me.x + '_' + me.y + ')',
+            goal
+        );
+
+        let problem = pddlProblem.toPddlString();
+        // Get the plan from the online solver
+        var plan = await onlineSolver(domain, problem);
+    
+    return plan
+}
+
+// parameters of the eviroment
 let parameters = null
 client.onConfig( (param) => {
     parameters = param
-    console.log(parameters);
+    console.log("PARAMS:",parameters);
 } )
 
+// variable that contain the date of the last parcel sensing
+let last_parcel_sensing = Date.now();
+const blacklisted_parcels = new Map();  // the ones we don't want to pick up anymore
+let shout_timer = Date.now();
+
+// callback function that is called when the agent receives the information about the parcels
+// that are detected by the agent
+// This fuction is used in order to save the parcels that are detected by the agent,
+// to send the information about the parcels to the partner and
+// to delete the parcels that are not detected anymore from the map after the decading interval
+client.onParcelsSensing( async ( perceived_parcels ) => {
+
+    for (const p of perceived_parcels) {
+        parcel_timers.set(p.id, Date.now());
+        parcels.set(p.id, p);
+    }
+
+    // if in parcel_timers parcels were not seen in along time, then delete them
+    for (const [p_id, time] of parcel_timers.entries()){
+        if (Date.now() - time >= 2 * parseInt(parameters['PARCEL_DECADING_INTERVAL'])*parameters['PARCEL_REWARD_AVG']){
+            parcels.delete(p_id);
+            parcel_timers.delete(p_id);
+            blacklisted_parcels.delete(p_id);
+        }
+    }
+
+    //sent parcel to my partner every 4 seconds
+    if (myPartnerId !== undefined && parcels.size > 0 && Date.now() - last_parcel_sensing > 4000){
+
+        last_parcel_sensing = Date.now();  // send max. every 5s
+
+        var parcelString = `Parcels sensing,${parcels.size},`;
+        for (const [_, p] of parcels.entries()){
+            parcelString += `${p.id}-${p.x}-${p.y}-${p.carriedBy}-${p.reward},`
+        }
+        client.say(myPartnerId, parcelString);
+    }
+
+} )
+
+// variable that contiains the beliefset of the agent for the PDDL problem
 var myBeliefset = new Beliefset();
+// populate the beliefset with the information about the map
 client.onMap((width, height, tiles) => {
     for (let { x, y, delivery } of tiles) {
         myBeliefset.declare('tile ' + 't' + x + '_' + y);
@@ -267,13 +445,12 @@ client.onMap((width, height, tiles) => {
     }
 });
 
-
-
+//function that find the nearest delivery tile from the node object
 function findNearestDelivery(map, object){
     let distance = Number.MAX_VALUE
     let node = null
     for(const pos of map.getDelivery()){
-        const dist2me = distanceString(object.x+'|'+object.y, pos)
+        const dist2me = distanceString(Math.trunc(object.x)+'|'+Math.trunc(object.y), pos)
         if (dist2me<distance){
             distance = dist2me
             node = pos
@@ -283,13 +460,14 @@ function findNearestDelivery(map, object){
 }
 
 
-
+//function that find the furthest delivery tile from the node object
 function findFurthestDelivery(map, object){
     let distance = Number.MIN_VALUE
     let node = null
     for(const pos of map.getDelivery()){
-        const dist2me = distanceString(object.x+'|'+object.y, pos)
-        if (dist2me>distance){
+        const dist2me = aStarPathModified(myDag,Math.trunc(object.x)+'|'+Math.trunc(object.y),pos).length
+        
+        if (dist2me>distance && dist2me > 0){
             distance = dist2me
             node = pos
         }
@@ -297,60 +475,58 @@ function findFurthestDelivery(map, object){
     return node
 }
 
-/**
- * Options generation and filtering function
- */
-client.onParcelsSensing( parcels => {
-    //? gestire parcelsensing perché si attiva solo con un pacchetto
-    // TODO revisit beliefset revision so to trigger option generation only in the case a new parcel is observed
-    //carried by 
-    //distanza massima
-    //se non ci sono pacchetti nuovi rispetto history muoviti verso il centro
-    //se non ci sono pacchetti nuovi risp   history e ho un pacchetto io carriedBy consegnalo
+//function that find the furthest spawner tile from the node object
+function findFurthestTile(map, object){
+    let distance = Number.MIN_VALUE
+    let node = null
+    for(const pos of map.getSpawner()){
+        const dist2me = aStarPathModified(myDag,Math.trunc(object.x)+'|'+Math.trunc(object.y),pos).length
+        
+        if (dist2me>distance && dist2me > 0){
+            distance = dist2me
+            node = pos
+        }
+    }
+    return node
+}
 
-    //parcels 
-    /**
-     * Options generation
-     */
-    
+// fuction used in order to select our desired action
+// (We call 2 times the method onParcelsSensing in order to have a clearer code;
+// the first time is used to populate the parcels, the second time is used to select the action)
+client.onParcelsSensing( parcels => {
+    // select the valid action and update the carriedByMe map
     const options = []
     let score = 0
-    for (const parcel of parcels.values())
+    for (const parcel of parcels.values()){
         if ( ! parcel.carriedBy ){
             options.push( [ 'go_pick_up', parcel.x, parcel.y, parcel.id ] );
         }else if(parcel.carriedBy == me.id){
             score = score + parcel.reward
             carriedByMe.set(parcel.id, parcel.reward)
         }
+    }
+    //reset the carriedByMe map if the score is negative or 0
     if (score <= 0){
         carriedByMe = new Map()
     }
-    //Go to delivery
-    //!Delivery???
+    // if the agent have parcels to deliver, then add the delivery action to the queue
     if (carriedByMe.size != 0){
         const coordinate = stringToCoordinate(findNearestDelivery(myMap, me))
         myAgent.removeDelivery()
         myAgent.push( ['delivery', coordinate[0], coordinate[1]])
+    // if the agent doesn't have options (go_pick_up) and the carriedByMe map is empty,
+    // then the agent will go to the furthest spawner tile
     }else if(options.length==0 && carriedByMe.size == 0){
-        const coordinate = stringToCoordinate(findFurthestDelivery(myMap, me))
-        //myAgent.removeGoTo() //? funziona?
-        myAgent.push(['go_to', coordinate[0], coordinate[1]])
-        /*
-        if (me.x % 1 == 0 && me.y % 1 == 0){
-            const neighbours = myDag.getNeighbours(me.x+'|'+me.y)
-            const random = Math.floor(Math.random() * neighbours.length) 
-            const coordinate = stringToCoordinate(neighbours[random])
-            //console.log("go to", coordinate, random)
-            myAgent.push(['go_to', coordinate[0], coordinate[1]])
+        if (myMap.getMatrix() == []) {
+            console.log("myMap is empty. Cannot calculate coordinates.");
+            // Handle the case where myMap is empty, e.g., by returning early or providing default coordinates
+        } else {
+            const coordinate = stringToCoordinate(findFurthestTile(myMap, me));
+            // myAgent.removeGoTo(); // Uncomment if necessary and if the method exists
+            myAgent.push(['go_to', coordinate[0], coordinate[1]]);
         }
-        */
     }
-    //Move randomly
-    //if (options.length==0 && )
-    /**
-     * Options filtering
-     */
-    //! Astar o distance?
+    // if the agent have options (go_pick_up) then select the best option and add it to the queue
     let best_option;
     let nearest = Number.MAX_VALUE;
     for (const option of options) {
@@ -363,47 +539,57 @@ client.onParcelsSensing( parcels => {
             }
         }
     }
-
-    /**
-     * Best option is selected
-     */
     if ( best_option )
         myAgent.push( best_option )
 
 } )
 
+// All the agent that are detected by the agent with their information
 let agentDetected = new Map();
+// variable that contains the date of the last agent sending
+let agent_timer = Date.now();
 client.onAgentsSensing( (agents) =>{
-    //myAgent.push(['go_to', 12, 12])
+    // update the agentDetected map
     for(const agent of agents){  
         agent.countSeen = -1;
         agentDetected.set(agent.id, agent);
     }
+    // if the agent is not detected anymore update the counter of the agent
     for(const agent of agentDetected.values()){  
         if( agent.countSeen < 60){
             agent.countSeen =  agent.countSeen + 1;
             agentDetected.set(agent.id, agent);
         }
     }
-    console.log("Agent_detected: ", agentDetected)
-    //console.log("Agents Sensing--------",agentDetected);
+
+    // send agents to partner every 10s
+    if (myPartnerId !== undefined && agentDetected.size > 0 && Date.now() - agent_timer > 10000){
+        agent_timer = Date.now();  // send max. every 10s
+
+        var agentString = `Agents sensing,${agentDetected.size},`;
+        for (const [_, a] of agentDetected.entries()){
+            agentString += `${a.id}-${a.name}-${a.x}-${a.y}-${a.score},`
+        }
+        client.say(myPartnerId, agentString);
+    }
+
 } )
-// client.onYou( agentLoop )
 
+// Position x and y of the last intention 
+let lastIntention = {x : -1, y : -1}
 
-/**
- * Intention revision loop
- */
+// class that represents the intention revision
 class IntentionRevision {
 
     #intention_queue = new Array();
     get intention_queue () {
         return this.#intention_queue;
     }
+    // method that removes the delivery action from the queue
     removeDelivery (){
         this.#intention_queue = this.#intention_queue.filter((elem) => elem.predicate[0] != 'delivery')
     }
-
+    // method that removes the go_to action from the queue
     removeGoTo(){
         this.#intention_queue = this.#intention_queue.filter((elem) => elem.predicate[0] != 'go_to')
     }
@@ -414,6 +600,15 @@ class IntentionRevision {
 
     async loop ( ) {
         while ( true ) {
+            // If the agent is not in a broadcast state, then send the message to the partner
+            if (broadcast_id && myPartnerId === undefined){
+                if (Date.now() - shout_timer > 3000){  // every 3s
+                    client.shout("HELLO");
+                    shout_timer = Date.now();
+                }
+                
+            }
+            
             // Consumes intention_queue if not empty
             if ( this.intention_queue.length > 0 ) {
                 console.log( 'intentionRevision.loop', this.intention_queue.map(i=>i.predicate) );
@@ -422,27 +617,34 @@ class IntentionRevision {
                 const intention = this.intention_queue[0];
                 
                 // Is queued intention still valid? Do I still want to achieve it?
-                // TODO this hard-coded implementation is an example
-                let id = intention.predicate[2]
-                let p = parcels.get(id)
-                if ( p && p.carriedBy ) {
-                    console.log( 'Skipping intention because no more valid', intention.predicate )
-                    continue;
+                let x = intention.predicate[1]
+                let y = intention.predicate[2]
+
+                // Check if my partner is nearer than me wrt the goal
+                if(intention.predicate[0] == 'go_pick_up'){
+                    let id = intention.predicate[3]
+                    let p = parcels.get(id)
+                    if ( p && p.carriedBy ) {
+                        console.log( 'Skipping intention because no more valid', intention.predicate )
+                        continue;
+                    }
+
+                    if (blacklisted_parcels.get(id) != undefined){
+                        continue; 
+                    }
                 }
 
+                GoalReachingCoordinate.x = x
+                GoalReachingCoordinate.y = y
                 // Start achieving intention
                 await intention.achieve()
                 // Catch eventual error and continue
                 .catch( error => {
-                    // console.log( 'Failed intention', ...intention.predicate, 'with error:', ...error )
+
                 } );
-                
-                // Remove from the queue
-                //? go_to gestito 
-                //!if (intention.predicate[0] != 'go_to'){
+
+                // Remove intention from queue
                 this.#intention_queue = this.#intention_queue.filter((elem) => elem.predicate.join(' ') != intention.predicate.join(' '))
-                //!}
-                //this.intention_queue.shift();
                 see_queue(this.intention_queue)
             }
             // Postpone next iteration at setImmediate
@@ -458,20 +660,6 @@ class IntentionRevision {
 
 }
 
-class IntentionRevisionQueue extends IntentionRevision {
-
-    async push ( predicate ) {
-        
-        // Check if already queued
-        if ( this.intention_queue.find( (i) => i.predicate.join(' ') == predicate.join(' ') ) )
-            return; // intention is already queued
-
-        console.log( 'IntentionRevisionReplace.push', predicate );
-        const intention = new Intention( this, predicate );
-        this.intention_queue.push( intention );
-    }
-
-}
 
 function see_queue(queue){
     console.log('\x1b[36m%s\x1b[0m', "Start Queue Intention")
@@ -481,8 +669,11 @@ function see_queue(queue){
     console.log('\x1b[36m%s\x1b[0m', "End Queue Intention")
 }
 
-class IntentionRevisionReplace extends IntentionRevision {
 
+// Class that extends the IntentionRevision class and that is used in order to 
+// order the intentions based on the utility function
+// and to stop the current intention if the new intention is different from the current one
+class IntentionRevisionRevise extends IntentionRevision {
     async push ( predicate ) {
         // Check if already queued
         var is_present = false
@@ -497,30 +688,28 @@ class IntentionRevisionReplace extends IntentionRevision {
                 }
             }
         }
-        //? modificare e mettere [0]  
-        const first = this.intention_queue[0]; // 10 7 4 2 // 7
-        //* cancel
-        //! non funziona perché non è possibile modificare un attributo privato
-        //if(is_present_go_to==true && predicate[0]=='go_to' && is_present == false){
-        //}
+        // first element of the queue (the one that is being executed)
+        const first = this.intention_queue[0]; 
+
+        // Check if the intention is not already queued
         if(is_present == false) {
             const intention = new Intention( this, predicate );
-            console.log( 'IntentionRevisionReplace.push', predicate );
-            //console.log("Utility Function:", UtilityFunction(intention.predicate, intention.parent))
+            //push the intention in the queue
             this.intention_queue.push( intention );
         }
+        // Order the intentions queue based on the utility function
+        // and remove the intentions with utility function <= 0
         if(me.x % 1 == 0 && me.y % 1 == 0){
             this.intention_queue.sort((a, b) => UtilityFunction(b.predicate, b.parent) - UtilityFunction(a.predicate, a.parent))
-            this.intention_queue = this.intention_queue.filter(item => { return UtilityFunction(item.predicate, item.parent) > 0; }); //* non funziona; restituisce un valore ma non modifica la coda
+            this.intention_queue = this.intention_queue.filter(item => { return UtilityFunction(item.predicate, item.parent) > 0; });
             see_queue(this.intention_queue)
         }
+        // first element of the queue ordered
         const first2 = this.intention_queue[0];
-        // Force current intention stop
         if (first & first2){
             console.log(first.predicate.join(' '), first2.predicate.join(' ')) //perché undefinded first ae first 2?
         }
-        //! gestire 2 delivery nella coda
-        //! gestire 2 go_to nella coda
+        // Force current intention stop in order to start the new one (if the new intention is different from the current one)
         if ( first && first2 && first.predicate.join(' ') != first2.predicate.join(' ') ) {
             first.stop();
         }
@@ -528,79 +717,63 @@ class IntentionRevisionReplace extends IntentionRevision {
 
 }
 
-class IntentionRevisionRevise extends IntentionRevision {
 
-    async push ( predicate ) {
-        console.log( 'Revising intention queue. Received', ...predicate );
-        // TODO
-        // - order intentions based on utility function (reward - cost) (for example, parcel score minus distance)
-        // - eventually stop current one
-        // - evaluate validity of intention
-        // Check if already queued
-        const last = this.intention_queue.at( this.intention_queue.length - 1 );
-        if ( last && last.predicate.join(' ') == predicate.join(' ') ) {
-            return; // intention is already being achieved
-        }
-        const intention = new Intention( this, predicate );
-        console.log("Utility Function:", UtilityFunction(intention.predicate, intention.parent))
-        this.intention_queue.push( intention );
-        // Force current intention stop 
-        if ( last ) {
-            last.stop();
-        }
-    }
 
-}
-
-/*
-*point of parcels
-*distace 
-*agents adversarial near parcels
-*/
-
+// function that calculate the utility function of a predicate
 function UtilityFunction(predicate, parent){
     const action = predicate[0]
     const x = predicate[1]
     const y = predicate[2]
     let score = 0
+
+    // decading interval = movement duration / parcel decading interval
     let decading_interval = (parameters['MOVEMENT_DURATION']/1000)
     if (parameters['PARCEL_DECADING_INTERVAL'] != 'infinite'){
         decading_interval = decading_interval / parseInt(parameters['PARCEL_DECADING_INTERVAL'])
     }else{
         decading_interval = 0
     }
-
+    // calculate the score of the predicate based on the parcel that are carried by the agent
     let scorePackageCarriedByMe = 0
     for (const [,s] of carriedByMe) {
         scorePackageCarriedByMe = scorePackageCarriedByMe + s; // points that myAgent have 
     }
-    score = scorePackageCarriedByMe - (carriedByMe.size * aStarPath(myDag, me.x+'|'+me.y, x+'|'+y).length * decading_interval)
+    score = scorePackageCarriedByMe - (carriedByMe.size * aStarPathModified(myDag, me.x+'|'+me.y, x+'|'+y).length * decading_interval)
     
+    // if the action is go_to then the score is 1
     if(action == 'go_to'){
         score = 1
     }
+    // if the action is go_pick_up
     if(action == 'go_pick_up'){
         const node = findNearestDelivery(myMap, {x: x, y: y})
-        score =  score + parcels[predicate[3]] - (aStarPath(myDag, node, x+'|'+y).length * decading_interval * (carriedByMe.size + 1))
+        if(parcels.has(predicate[3])){
+            // points that myAgent have + points that myAgent will have - points that i lose in order to arrive at destination
+            score =  score + parcels.get(predicate[3]).reward - (aStarPathModified(myDag, node, x+'|'+y).length * decading_interval * (carriedByMe.size + 1))
 
-        let vantage = Number.MAX_VALUE
-        const alpha = 3
-        const beta = 5
-        let scoreAdversarial = Number.MAX_VALUE
-        for(const [,a] of agentDetected){
-            let ourAdvantage = aStarPath(myDag, parseInt(a.x)+'|'+parseInt(a.y), x+'|'+y).length - aStarPath(myDag, me.x+'|'+me.y, x+'|'+y).length
-            ourAdvantage = alpha*ourAdvantage/(a.countSeen + 1)
-            
-            if(ourAdvantage < vantage){
-                vantage = ourAdvantage
-                scoreAdversarial = a.score
+            let vantage = Number.MAX_VALUE
+            const alpha = 3
+            const beta = 5
+            let scoreAdversarial = Number.MAX_VALUE
+            // penalize parcels that are nearer other agent wrt me
+            for(const [,a] of agentDetected){
+                let ourAdvantage = aStarPathModified(myDag, parseInt(a.x)+'|'+parseInt(a.y), x+'|'+y).length - aStarPathModified(myDag, me.x+'|'+me.y, x+'|'+y).length
+                ourAdvantage = alpha*ourAdvantage/(a.countSeen + 1)
+                
+                if(ourAdvantage < vantage){
+                    vantage = ourAdvantage
+                    scoreAdversarial = a.score
+                }
+            }
+            if (vantage < 0 && scoreAdversarial*beta > me.score){
+                score = score + vantage
             }
         }
-        if (vantage < 0 && scoreAdversarial*beta > me.score){
-            score = score + vantage
-        }
+
+        
 
     }
+    // deliver package when the agent have a lot of point
     if(action == 'delivery'){
         if(scorePackageCarriedByMe > 10*parameters['PARCEL_REWARD_AVG']){
             score = 1000
@@ -608,6 +781,10 @@ function UtilityFunction(predicate, parent){
         if(me.x == x && me.y == y){
             score = 1000
         }
+    }
+    // put the score at 0 if is not possibile to arrive in that position
+    if (aStarPathModified(myDag, Math.trunc(me.x)+'|'+Math.trunc(me.y), Math.trunc(x)+'|'+Math.trunc(y)).length === 0){
+        score = 0
     }
     //console.log(predicate, score, parcels[predicate[3]], distanceString(x +'|'+ y, findNearestDelivery(myMap, {x: x, y: y}), distance({x,y}, me), Object.keys(carriedByMe).length, scorePackageCarriedByMe)
     return score;
@@ -618,9 +795,8 @@ function UtilityFunction(predicate, parent){
  * Start intention revision loop
  */
 
-// const myAgent = new IntentionRevisionQueue();
-const myAgent = new IntentionRevisionReplace();
-// const myAgent = new IntentionRevisionRevise();
+const myAgent = new IntentionRevisionRevise();
+
 myAgent.loop();
 
 
@@ -723,6 +899,7 @@ class Intention {
  */
 const planLibrary = [];
 
+// class that is used in order execute actions
 class Plan {
 
     // This is used to stop the plan
@@ -764,7 +941,9 @@ class Plan {
     }
 
 }
-
+// Class that is used in order to pick up a parcel 
+// This class use the astar algorithm in order to reach the parcel
+// (The subIntention('go_to', x, y) is used in order to reach the parcel
 class GoPickUp extends Plan {
 
     static isApplicableTo ( go_pick_up, x, y, id ) {
@@ -773,7 +952,11 @@ class GoPickUp extends Plan {
 
     async execute ( go_pick_up, x, y, id) {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
-        await this.subIntention( ['go_to', x, y] );
+        let res = await this.subIntention('go_to', x, y);
+        if (!res){
+            return false;
+        }
+
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await client.pickup()
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
@@ -782,18 +965,51 @@ class GoPickUp extends Plan {
     }
 
 }
-
+// Class that is used in order to deliver a parcel
+// Ask to the partner if I cannot reach the desire position
+// This class work with the astar algorithm in order to reach the delivery position
 class GoDelivery extends Plan {
 
     static isApplicableTo ( delivery, x, y) {
         return delivery == 'delivery';
     }
 
+    //check if I can reach the delivery point, otherwise ask to myPartnerId
     async execute ( delivery, x, y ) {
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
-        await this.subIntention( ['go_to', x, y] );
+        let result = await this.subIntention( ['go_to', x, y] );
+        if (!result){ // if I can not reach it
+            if (myPartnerId !== undefined){
+                let reply = await client.ask(myPartnerId, `${x},${y}`+',can you go there?')
+                
+                // ask other agent to help
+                if (Boolean(reply)){
+                    console.log('[Delivery] Drop parcels for other agent to pick up.')
+                    // blacklist all parcels I am carrying
+                    for (const [p_id, parcel] of parcels.entries()){
+                        if (parcel.carriedBy == me.id){
+                            blacklisted_parcels.set(p_id, parcel);
+                        }
+                    }
+
+                    // put all parcels down
+                    client.putdown(); 
+                }
+            }
+            
+            return false;
+        }
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
-        await client.putdown();
+        let result_putdown = await client.putdown();
+        if(result_putdown.length > 0){
+            // remove all parcels that were put down from parcel map (otherwise, it will get stuck on delivery tile)
+            for (const [p_id, parcel] of parcels.entries()){
+                if (parcel.carriedBy == me.id){
+                    parcels.delete(p_id);
+                    parcel_timers.delete(p_id);
+                }
+            }
+        } // in teoria ora modifyGlobalVariables() non dovrebbe più servire
         if ( this.stopped ) throw ['stopped']; // if stopped then quit
         await modifyGlobalVariables()
         return true;
@@ -801,6 +1017,7 @@ class GoDelivery extends Plan {
 
 }
 
+// Class that is used in order to make a step randomly
 class MoveRandom extends Plan {
 
     static isApplicableTo (move_random) {
@@ -843,98 +1060,20 @@ class MoveRandom extends Plan {
     }
     
     if ( ! status_x && ! status_y) {
-        this.log('stucked');
+        this.log('stucked from random');
         throw 'stucked';
     }
     return true;
     }
 }
 
-class BlindMove extends Plan {
-
-    static isApplicableTo ( go_to, x, y ) {
-        return go_to == 'go_to';
-    }
-
-    async execute ( go_to, x, y ) {
-
-        while ( me.x != x || me.y != y ) {
-
-            if ( this.stopped ) throw ['stopped']; // if stopped then quit
-
-            let status_x = false;
-            let status_y = false;
-            
-            // this.log('me', me, 'xy', x, y);
-
-            if ( x > me.x )
-                status_x = await client.move('right')
-                // status_x = await this.subIntention( 'go_to', {x: me.x+1, y: me.y} );
-            else if ( x < me.x )
-                status_x = await client.move('left')
-                // status_x = await this.subIntention( 'go_to', {x: me.x-1, y: me.y} );
-
-            if (status_x) {
-                me.x = status_x.x;
-                me.y = status_x.y;
-            }
-
-            if ( this.stopped ) throw ['stopped']; // if stopped then quit
-
-            if ( y > me.y )
-                status_y = await client.move('up')
-                // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y+1} );
-            else if ( y < me.y )
-                status_y = await client.move('down')
-                // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y-1} );
-
-            if (status_y) {
-                me.x = status_y.x;
-                me.y = status_y.y;
-            }
-            
-            if ( ! status_x && ! status_y) {
-                this.log('stucked');
-                throw 'stucked';
-            } else if ( me.x == x && me.y == y ) {
-                // this.log('target reached');
-            }
-            
-        }
-
-        return true;
-
-    }
-}
 
 
-
-async function prova () {
-    var belief = new Beliefset();
-    belief.declare('switched-off ' + me.name);
-    belief.declare('switched-on light2');
-    var pddlProblem = new PddlProblem(
-        'lights',
-        belief.objects.join(' '),
-        belief.toPddlString(),
-        'and (switched-on ciao) (switched-on light2)'
-    )
-    
-    let problem = pddlProblem.toPddlString();
-    console.log( problem );
-
-    let domain = await readFile('./domain-lights.pddl' );
-
-    var plan = await onlineSolver( domain, problem );
-    
-    const pddlExecutor = new PddlExecutor( { name: 'lightOn', executor: (l) => console.log('lighton '+l) } );
-    console.log("----------------------------")
-    pddlExecutor.exec( plan );
-    console.log("----------------------------")
-}
-
+//Read the domain file
 let domain = await readFile('./new_domain.pddl');
 
+// Class that execute the go_to actions
+// Work with the PDDL Domain and Problem
 class PddlPlan extends Plan{
 
     static isApplicableTo ( go_to, x, y ) {
@@ -958,9 +1097,9 @@ class PddlPlan extends Plan{
         // Get the plan from the online solver
         var plan = await onlineSolver(domain, problem);
         let coordinates = []
+        //Populate the coordinates array with the x and y of the plan
         plan.forEach(action => {
             let end = action.args[2].split('_');   
-          
             coordinates.push({
               x: parseInt(end[0].substring(1)), 
               y: parseInt(end[1])                  
@@ -969,6 +1108,7 @@ class PddlPlan extends Plan{
         let countStacked = 3
         console.log("execute")
         console.log(coordinates)
+        // Loop through the coordinates array and move the agent to the desired position
         while ( me.x != x || me.y != y ) {
             
             if ( this.stopped ) throw ['stopped']; // if stopped then quit
@@ -1011,11 +1151,11 @@ class PddlPlan extends Plan{
             }
             
             if ( ! status_x && ! status_y) {
-                this.log('stucked ', countStacked);
-                //await this.subIntention( 'go_to', {x: x, y: y} );
+                this.log('stucked from pddlplan', countStacked);
                 await timeout(1000)
                 if(countStacked <= 0){
-                    throw 'stopped'; //! modificato da stucked
+                    return false;
+                    throw 'stopped';
                 }else{
                     countStacked -= 1;
                 }
@@ -1032,7 +1172,8 @@ class PddlPlan extends Plan{
 }
 
 
-
+// Class that is used in order to pick up a parcel
+// This class work with the PDDL Domain and Problem
 class PddlGoPickUp extends Plan {
 
     static isApplicableTo(go_pick_up, x, y, id) {
@@ -1054,7 +1195,7 @@ class PddlGoPickUp extends Plan {
         // Get the plan from the online solver
         var plan = await onlineSolver(domain, problem);
         let coordinates = [];
-
+        //Populate the coordinates array with the x and y of the plan
         plan.forEach(action => {
             let end = action.args[2].split('_');
             coordinates.push({
@@ -1101,7 +1242,7 @@ class PddlGoPickUp extends Plan {
             }
 
             if (!status_x && !status_y) {
-                this.log('stucked ', countStacked);
+                this.log('stucked from pddlgopickup', countStacked);
                 await timeout(1000);
                 if (countStacked <= 0) {
                     throw 'stopped'; // modified from stucked
@@ -1115,14 +1256,17 @@ class PddlGoPickUp extends Plan {
     }
 }
 
-
+// Class that is used in order to deliver a parcel
+// This class work with the PDDL Domain and Problem
 class PddlGoDelivery extends Plan {
 
     static isApplicableTo(delivery, x, y) {
+        console.log("APPLICABLE:")
         return delivery == 'delivery';
     }
 
     async execute(delivery, x, y) {
+        console.log("EXECUTE:")
         // Define the PDDL goal for delivery
         let id = carriedByMe.keys().next().value;
         let deliveryGoal = 'and (at p' + id + ' t' + x + '_' + y + ') (not (holding ' + me.name + ' p' + id + '))';
@@ -1135,11 +1279,38 @@ class PddlGoDelivery extends Plan {
             deliveryGoal
         );
 
+        console.log("PDDLDELIVEROO:",pddlDeliveryProblem)
+
         let deliveryProblem = pddlDeliveryProblem.toPddlString();
         // Get the delivery plan from the online solver
         var deliveryPlan = await onlineSolver(domain, deliveryProblem);
-        let deliveryCoordinates = [];
 
+        // Check if the plan is valid
+        if (!deliveryPlan || deliveryPlan.length === 0) {
+            // If I cannot reach it
+            if (myPartnerId !== undefined) {
+                let reply = await client.ask(myPartnerId, `${x},${y}` + ',can you go there?');
+
+                // Ask other agent to help
+                if (Boolean(reply)) {
+                    console.log('[Delivery] Drop parcels for other agent to pick up.');
+                    // Blacklist all parcels I am carrying
+                    for (const [p_id, parcel] of parcels.entries()) {
+                        if (parcel.carriedBy == me.id) {
+                            blacklisted_parcels.set(p_id, parcel);
+                        }
+                    }
+
+                    // Put all parcels down
+                    await client.putdown();
+                }
+            }
+
+            return false;
+        }
+
+        let deliveryCoordinates = [];
+        //Populate the deliveryCoordinates array with the x and y of the plan
         deliveryPlan.forEach(action => {
             let end = action.args[2].split('_');
             deliveryCoordinates.push({
@@ -1189,9 +1360,28 @@ class PddlGoDelivery extends Plan {
             }
 
             if (!status_x && !status_y) {
-                this.log('stucked ', countStacked);
+                this.log('stucked from pddlgodelivery', countStacked);
                 await timeout(1000);
-                if (countStacked <= 0) {
+                if (countStacked <= 1) {
+                    if (myPartnerId !== undefined) {
+                        let reply = await client.ask(myPartnerId, `${x},${y}` + ',can you go there?');
+        
+                        // Ask other agent to help
+                        if (Boolean(reply)) {
+                            console.log('[Delivery] Drop parcels for other agent to pick up.');
+                            // Blacklist all parcels I am carrying
+                            for (const [p_id, parcel] of parcels.entries()) {
+                                if (parcel.carriedBy == me.id) {
+                                    blacklisted_parcels.set(p_id, parcel);
+                                }
+                            }
+        
+                            // Put all parcels down
+                            await client.putdown();
+                        }
+                    }
+        
+                    //return false;
                     throw 'stopped'; // modified from stucked
                 } else {
                     countStacked -= 1;
@@ -1203,7 +1393,9 @@ class PddlGoDelivery extends Plan {
     }
 }
 
-
+// Class that is used in order to move to a specific position
+// Use the Astarpath in order to reach the desired position
+// Check if is stucked and try to find a new path
 class AstarPlan extends Plan{
 
     static isApplicableTo ( go_to, x, y ) {
@@ -1212,7 +1404,7 @@ class AstarPlan extends Plan{
     }
 
     async execute ( go_to, x, y ) {
-        const path = aStarPath(myDag, me.x+'|'+me.y, x+'|'+y)
+        const path = aStarPathModified(myDag, Math.trunc(me.x)+'|'+Math.trunc(me.y), Math.trunc(x)+'|'+Math.trunc(y))
         let countStacked = 3
         console.log("execute")
         while ( me.x != x || me.y != y ) {
@@ -1246,10 +1438,8 @@ class AstarPlan extends Plan{
 
             if ( coordinate[1] > me.y )
                 status_y = await client.move('up')
-                // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y+1} );
             else if ( coordinate[1] < me.y )
                 status_y = await client.move('down')
-                // status_x = await this.subIntention( 'go_to', {x: me.x, y: me.y-1} );
 
             if (status_y) {
                 me.x = status_y.x;
@@ -1258,10 +1448,17 @@ class AstarPlan extends Plan{
             
             if ( ! status_x && ! status_y) {
                 this.log('stucked ', countStacked);
-                //await this.subIntention( 'go_to', {x: x, y: y} );
+                if (countStacked > 1){ //Wait for 1 second and try again when countStacked > 1
+                    await timeout(1000)
+                }else{ // if countStacked <= 1, try to find a new path
+                    path = aStarPathModified(myDag, Math.trunc(me.x)+'|'+Math.trunc(me.y), Math.trunc(x)+'|'+Math.trunc(y))
+                    if (path.length == 0){
+                        throw 'stopped';
+                    }
+                }
                 await timeout(1000)
                 if(countStacked <= 0){
-                    throw 'stopped'; //! modificato da stucked
+                    throw 'stopped'; 
                 }else{
                     countStacked -= 1;
                 }
@@ -1277,6 +1474,7 @@ class AstarPlan extends Plan{
     }
 }
 
+// await 1 sec
 function timeout(mseconds) {
     return new Promise(resolve => {
       setTimeout(() => {
@@ -1284,8 +1482,97 @@ function timeout(mseconds) {
       }, mseconds);
     });
   }
+
+// fuction that find the path between two nodes using the Astar algorithm
+// The function is modified in order to avoid the nodes that are occupied by other agents
+function aStarPathModified(dag, start, goal) {
+
+    const frontier = [];
+    const explored = [];
+
+    class Node {
+        node_name;
+        pathCost;
+        heuristic;
+        completeDistance;
+        parent;
+        constructor(node_name, parent, pathCost, heuristic) {
+            this.node_name = node_name;
+            this.parent = parent;
+            this.pathCost = pathCost;
+            this.heuristic = heuristic;
+            this.completeDistance = pathCost + heuristic;
+        }
+    }
+
+    function indexInArray(node, array) {
+        return array.findIndex((element) => element.node_name == node.node_name);
+    }
+
+    function solution(node) {
+        const array = [];
+        while (node != null) {
+            array.push(node.node_name);
+            node = node.parent;
+        }
+        return array.reverse();
+    }
+
+    if (start.includes(".") || goal.includes(".")) {
+        return [];
+    }
+
+    frontier.push(new Node(start, null, 0, distanceString(start, goal)));
+
+    while (frontier.length !== 0) {
+        frontier.sort((a, b) => a.completeDistance - b.completeDistance);
+        const lowestCostNode = frontier.shift();
+        if (lowestCostNode.node_name === goal) {
+            return solution(lowestCostNode);
+        }
+
+        explored.push(lowestCostNode);
+
+        const neighbours = dag.getNeighbours(lowestCostNode.node_name)
+            .filter(neighbour => !isOccupied(neighbour));
+
+        for (const childName of neighbours) {
+            const childNode = new Node(
+                childName,
+                lowestCostNode,
+                lowestCostNode.pathCost + 1,
+                distanceString(childName, goal)
+            );
+            const indexExplored = indexInArray(childNode, explored);
+            const indexFrontier = indexInArray(childNode, frontier);
+            if (indexExplored === -1 && indexFrontier === -1) {
+                frontier.push(childNode);
+            } else if (indexFrontier !== -1 && frontier[indexFrontier].completeDistance > childNode.completeDistance) {
+                frontier[indexFrontier] = childNode;
+            }
+        }
+    }
+
+    return [];
+}
+
+// if an agent is position over a specific node
+function isOccupied(node) {
+    const [x, y] = node.split('|').map(Number);
+    return isPositionOccupied(x, y);
+}
+
+function isPositionOccupied(x, y) {
+    for (const agent of agentDetected.values()) {
+        if (agent.x === x && agent.y === y && agent.countSeen < 10) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // plan classes are added to plan library 
-planLibrary.push( GoPickUp )
-planLibrary.push( AstarPlan )
-planLibrary.push( GoDelivery )
+planLibrary.push( PddlGoPickUp )
+planLibrary.push( PddlPlan )
+planLibrary.push( PddlGoDelivery )
 planLibrary.push( MoveRandom )
